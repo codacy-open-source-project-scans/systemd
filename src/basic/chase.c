@@ -81,7 +81,6 @@ int chaseat(int dir_fd, const char *path, ChaseFlags flags, char **ret_path, int
         const char *todo;
         int r;
 
-        assert(path);
         assert(!FLAGS_SET(flags, CHASE_PREFIX_ROOT));
         assert(!FLAGS_SET(flags, CHASE_STEP|CHASE_EXTRACT_FILENAME));
         assert(!FLAGS_SET(flags, CHASE_TRAIL_SLASH|CHASE_EXTRACT_FILENAME));
@@ -206,7 +205,7 @@ int chaseat(int dir_fd, const char *path, ChaseFlags flags, char **ret_path, int
         /* If we receive an absolute path together with AT_FDCWD, we need to return an absolute path, because
          * a relative path would be interpreted relative to the current working directory. Also, let's make
          * the result absolute when the file descriptor of the root directory is specified. */
-        bool need_absolute = (dir_fd == AT_FDCWD && path_is_absolute(path)) || dir_fd_is_root(dir_fd) > 0;
+        bool need_absolute = (dir_fd == AT_FDCWD && path_is_absolute(path)) || (dir_fd >= 0 && dir_fd_is_root(dir_fd) > 0);
         if (need_absolute) {
                 done = strdup("/");
                 if (!done)
@@ -618,11 +617,51 @@ int chaseat_prefix_root(const char *path, const char *root, char **ret) {
         return 0;
 }
 
+int chase_extract_filename(const char *path, const char *root, char **ret) {
+        int r;
+
+        /* This is similar to path_extract_filename(), but takes root directory.
+         * The result should be consistent with chase() with CHASE_EXTRACT_FILENAME. */
+
+        assert(path);
+        assert(ret);
+
+        if (isempty(path))
+                return -EINVAL;
+
+        if (!path_is_absolute(path))
+                return -EINVAL;
+
+        if (!empty_or_root(root)) {
+                _cleanup_free_ char *root_abs = NULL;
+
+                r = path_make_absolute_cwd(root, &root_abs);
+                if (r < 0)
+                        return r;
+
+                path = path_startswith(path, root_abs);
+                if (!path)
+                        return -EINVAL;
+        }
+
+        if (!isempty(path)) {
+                r = path_extract_filename(path, ret);
+                if (r != -EADDRNOTAVAIL)
+                        return r;
+        }
+
+        char *fname = strdup(".");
+        if (!fname)
+                return -ENOMEM;
+
+        *ret = fname;
+        return 0;
+}
+
 int chase_and_open(const char *path, const char *root, ChaseFlags chase_flags, int open_flags, char **ret_path) {
         _cleanup_close_ int path_fd = -EBADF;
         _cleanup_free_ char *p = NULL, *fname = NULL;
         mode_t mode = open_flags & O_DIRECTORY ? 0755 : 0644;
-        const char *q;
         int r;
 
         assert(!(chase_flags & (CHASE_NONEXISTENT|CHASE_STEP)));
@@ -640,13 +679,10 @@ int chase_and_open(const char *path, const char *root, ChaseFlags chase_flags, i
                 return r;
         assert(path_fd >= 0);
 
-        assert_se(q = path_startswith(p, empty_to_root(root)));
-        if (isempty(q))
-                q = ".";
-
-        if (!FLAGS_SET(chase_flags, CHASE_PARENT)) {
-                r = path_extract_filename(q, &fname);
-                if (r < 0 && r != -EADDRNOTAVAIL)
+        if (!FLAGS_SET(chase_flags, CHASE_PARENT) &&
+            !FLAGS_SET(chase_flags, CHASE_EXTRACT_FILENAME)) {
+                r = chase_extract_filename(p, root, &fname);
+                if (r < 0)
                         return r;
         }
 

@@ -49,6 +49,7 @@
 #include "logs-show.h"
 #include "main-func.h"
 #include "memory-util.h"
+#include "memstream-util.h"
 #include "missing_sched.h"
 #include "mkdir.h"
 #include "mount-util.h"
@@ -95,6 +96,7 @@ static bool arg_all = false;
 static PagerFlags arg_pager_flags = 0;
 static int arg_lines = ARG_LINES_DEFAULT;
 static bool arg_no_tail = false;
+static bool arg_truncate_newline = false;
 static bool arg_quiet = false;
 static bool arg_merge = false;
 static bool arg_boot = false;
@@ -366,6 +368,7 @@ static int help(void) {
                "  -a --all                   Show all fields, including long and unprintable\n"
                "  -f --follow                Follow the journal\n"
                "     --no-tail               Show all lines, even in follow mode\n"
+               "     --truncate-newline      Truncate entries by first newline character\n"
                "  -q --quiet                 Do not show info messages and privilege warning\n"
                "\n%3$sPager Control Options:%4$s\n"
                "     --no-pager              Do not pipe output into a pager\n"
@@ -444,6 +447,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_RELINQUISH_VAR,
                 ARG_SMART_RELINQUISH_VAR,
                 ARG_ROTATE,
+                ARG_TRUNCATE_NEWLINE,
                 ARG_VACUUM_SIZE,
                 ARG_VACUUM_FILES,
                 ARG_VACUUM_TIME,
@@ -464,6 +468,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "full",                 no_argument,       NULL, 'l'                      },
                 { "no-full",              no_argument,       NULL, ARG_NO_FULL              },
                 { "lines",                optional_argument, NULL, 'n'                      },
+                { "truncate-newline",     no_argument,       NULL, ARG_TRUNCATE_NEWLINE     },
                 { "no-tail",              no_argument,       NULL, ARG_NO_TAIL              },
                 { "new-id128",            no_argument,       NULL, ARG_NEW_ID128            }, /* deprecated */
                 { "quiet",                no_argument,       NULL, 'q'                      },
@@ -619,6 +624,10 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case ARG_NO_TAIL:
                         arg_no_tail = true;
+                        break;
+
+                case ARG_TRUNCATE_NEWLINE:
+                        arg_truncate_newline = true;
                         break;
 
                 case ARG_NEW_ID128:
@@ -1758,15 +1767,14 @@ static int format_journal_url(
                 sd_id128_t machine,
                 bool full,
                 char **ret_url) {
-        _cleanup_free_ char *url = NULL;
-        _cleanup_fclose_ FILE *f = NULL;
-        size_t url_size = 0;
-        int r;
+
+        _cleanup_(memstream_done) MemStream m = {};
+        FILE *f;
 
         assert(seed);
         assert(seed_size > 0);
 
-        f = open_memstream_unlocked(&url, &url_size);
+        f = memstream_init(&m);
         if (!f)
                 return -ENOMEM;
 
@@ -1787,17 +1795,7 @@ static int format_journal_url(
                         fprintf(f, ";hostname=%s", hn);
         }
 
-        r = fflush_and_check(f);
-        if (r < 0)
-                return r;
-
-        f = safe_fclose(f);
-
-        if (!url)
-                return -ENOMEM;
-
-        *ret_url = TAKE_PTR(url);
-        return 0;
+        return memstream_finalize(&m, ret_url, NULL);
 }
 #endif
 
@@ -2239,6 +2237,7 @@ static int show(Context *c) {
                         colors_enabled() * OUTPUT_COLOR |
                         arg_catalog * OUTPUT_CATALOG |
                         arg_utc * OUTPUT_UTC |
+                        arg_truncate_newline * OUTPUT_TRUNCATE_NEWLINE |
                         arg_no_hostname * OUTPUT_NO_HOSTNAME;
 
                 r = show_journal_entry(stdout, j, arg_output, 0, flags,

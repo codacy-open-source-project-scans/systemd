@@ -15,6 +15,7 @@
 #include "locale-util.h"
 #include "macro.h"
 #include "memory-util.h"
+#include "memstream-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "terminal-util.h"
@@ -169,10 +170,15 @@ char *delete_trailing_chars(char *s, const char *bad) {
         return s;
 }
 
-char *truncate_nl(char *s) {
+char *truncate_nl_full(char *s, size_t *ret_len) {
+        size_t n;
+
         assert(s);
 
-        s[strcspn(s, NEWLINE)] = 0;
+        n = strcspn(s, NEWLINE);
+        s[n] = '\0';
+        if (ret_len)
+                *ret_len = n;
         return s;
 }
 
@@ -604,9 +610,9 @@ char *strip_tab_ansi(char **ibuf, size_t *_isz, size_t highlight[2]) {
                 STATE_CSI,
                 STATE_CSO,
         } state = STATE_OTHER;
-        _cleanup_free_ char *obuf = NULL;
-        _cleanup_fclose_ FILE *f = NULL;
-        size_t osz = 0, isz, shift[2] = {}, n_carriage_returns = 0;
+        _cleanup_(memstream_done) MemStream m = {};
+        size_t isz, shift[2] = {}, n_carriage_returns = 0;
+        FILE *f;
 
         assert(ibuf);
         assert(*ibuf);
@@ -629,7 +635,7 @@ char *strip_tab_ansi(char **ibuf, size_t *_isz, size_t highlight[2]) {
 
         /* Note we turn off internal locking on f for performance reasons. It's safe to do so since we
          * created f here and it doesn't leave our scope. */
-        f = open_memstream_unlocked(&obuf, &osz);
+        f = memstream_init(&m);
         if (!f)
                 return NULL;
 
@@ -714,18 +720,11 @@ char *strip_tab_ansi(char **ibuf, size_t *_isz, size_t highlight[2]) {
                 }
         }
 
-        if (fflush_and_check(f) < 0)
-                return NULL;
-
-        f = safe_fclose(f);
-
-        if (!obuf)
+        char *obuf;
+        if (memstream_finalize(&m, &obuf, _isz) < 0)
                 return NULL;
 
         free_and_replace(*ibuf, obuf);
-
-        if (_isz)
-                *_isz = osz;
 
         if (highlight) {
                 highlight[0] += shift[0];

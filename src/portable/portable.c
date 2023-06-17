@@ -255,6 +255,7 @@ static int extract_now(
                         _cleanup_(portable_metadata_unrefp) PortableMetadata *m = NULL;
                         _cleanup_(mac_selinux_freep) char *con = NULL;
                         _cleanup_close_ int fd = -EBADF;
+                        struct stat st;
 
                         if (!unit_name_is_valid(de->d_name, UNIT_NAME_ANY))
                                 continue;
@@ -272,6 +273,17 @@ static int extract_now(
                         fd = openat(dirfd(d), de->d_name, O_CLOEXEC|O_RDONLY);
                         if (fd < 0) {
                                 log_debug_errno(errno, "Failed to open unit file '%s', ignoring: %m", de->d_name);
+                                continue;
+                        }
+
+                        /* Reject empty files, just in case */
+                        if (fstat(fd, &st) < 0) {
+                                log_debug_errno(errno, "Failed to stat unit file '%s', ignoring: %m", de->d_name);
+                                continue;
+                        }
+
+                        if (st.st_size <= 0) {
+                                log_debug("Unit file '%s' is empty, ignoring.", de->d_name);
                                 continue;
                         }
 
@@ -357,7 +369,7 @@ static int portable_extract_by_path(
         else {
                 _cleanup_(dissected_image_unrefp) DissectedImage *m = NULL;
                 _cleanup_(rmdir_and_freep) char *tmpdir = NULL;
-                _cleanup_(close_pairp) int seq[2] = PIPE_EBADF;
+                _cleanup_close_pair_ int seq[2] = PIPE_EBADF;
                 _cleanup_(sigkill_waitp) pid_t child = 0;
 
                 /* We now have a loopback block device, let's fork off a child in its own mount namespace, mount it
@@ -689,7 +701,7 @@ int portable_extract(
         _cleanup_(portable_metadata_unrefp) PortableMetadata *os_release = NULL;
         _cleanup_ordered_hashmap_free_ OrderedHashmap *extension_images = NULL, *extension_releases = NULL;
         _cleanup_hashmap_free_ Hashmap *unit_files = NULL;
-        _cleanup_(strv_freep) char **valid_prefixes = NULL;
+        _cleanup_strv_free_ char **valid_prefixes = NULL;
         _cleanup_(image_unrefp) Image *image = NULL;
         int r;
 
@@ -1130,7 +1142,7 @@ static int install_chroot_dropin(
                         }
         }
 
-        r = write_string_file(dropin, text, WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_ATOMIC);
+        r = write_string_file(dropin, text, WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_ATOMIC|WRITE_STRING_FILE_SYNC);
         if (r < 0)
                 return log_debug_errno(r, "Failed to write '%s': %m", dropin);
 
@@ -1177,7 +1189,7 @@ static int install_profile_dropin(
 
         if (flags & PORTABLE_PREFER_COPY) {
 
-                r = copy_file_atomic(from, dropin, 0644, COPY_REFLINK);
+                r = copy_file_atomic(from, dropin, 0644, COPY_REFLINK|COPY_FSYNC);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to copy %s %s %s: %m", from, special_glyph(SPECIAL_GLYPH_ARROW_RIGHT), dropin);
 
@@ -1295,7 +1307,7 @@ static int attach_unit_file(
                 if (fchmod(fd, 0644) < 0)
                         return log_debug_errno(errno, "Failed to change unit file access mode for '%s': %m", path);
 
-                r = link_tmpfile(fd, tmp, path, /* replace= */ false);
+                r = link_tmpfile(fd, tmp, path, LINK_TMPFILE_SYNC);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to install unit file '%s': %m", path);
 

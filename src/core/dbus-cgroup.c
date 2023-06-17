@@ -7,6 +7,7 @@
 #include "bpf-firewall.h"
 #include "bpf-foreign.h"
 #include "bus-get-properties.h"
+#include "bus-util.h"
 #include "cgroup-util.h"
 #include "cgroup.h"
 #include "core-varlink.h"
@@ -18,6 +19,7 @@
 #include "in-addr-prefix-util.h"
 #include "ip-protocol-list.h"
 #include "limits-util.h"
+#include "memstream-util.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "percent-util.h"
@@ -399,9 +401,9 @@ static int property_get_restrict_network_interfaces(
                 sd_bus_message *reply,
                 void *userdata,
                 sd_bus_error *error) {
-        int r;
+
         CGroupContext *c = ASSERT_PTR(userdata);
-        char *iface;
+        int r;
 
         assert(bus);
         assert(reply);
@@ -414,17 +416,7 @@ static int property_get_restrict_network_interfaces(
         if (r < 0)
                 return r;
 
-        r = sd_bus_message_open_container(reply, 'a', "s");
-        if (r < 0)
-                return r;
-
-        SET_FOREACH(iface, c->restrict_network_interfaces) {
-                r = sd_bus_message_append(reply, "s", iface);
-                if (r < 0)
-                        return r;
-        }
-
-        r = sd_bus_message_close_container(reply);
+        r = bus_message_append_string_set(reply, c->restrict_network_interfaces);
         if (r < 0)
                 return r;
 
@@ -657,15 +649,16 @@ static int bus_cgroup_set_transient_property(
                         return r;
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        _cleanup_(memstream_done) MemStream m = {};
                         _cleanup_free_ char *buf = NULL;
-                        _cleanup_fclose_ FILE *f = NULL;
-                        size_t size = 0;
+                        FILE *f;
 
                         if (n == 0)
                                 *filters = strv_free(*filters);
 
                         unit_invalidate_cgroup_bpf(u);
-                        f = open_memstream_unlocked(&buf, &size);
+
+                        f = memstream_init(&m);
                         if (!f)
                                 return -ENOMEM;
 
@@ -675,7 +668,7 @@ static int bus_cgroup_set_transient_property(
                         STRV_FOREACH(entry, *filters)
                                 fprintf(f, "%s=%s\n", name, *entry);
 
-                        r = fflush_and_check(f);
+                        r = memstream_finalize(&m, &buf, NULL);
                         if (r < 0)
                                 return r;
 
@@ -736,15 +729,15 @@ static int bus_cgroup_set_transient_property(
                         return r;
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        _cleanup_(memstream_done) MemStream m = {};
                         _cleanup_free_ char *buf = NULL;
-                        _cleanup_fclose_ FILE *f = NULL;
-                        size_t size = 0;
+                        FILE *f;
 
                         if (n == 0)
                                 while (c->bpf_foreign_programs)
                                         cgroup_context_remove_bpf_foreign_program(c, c->bpf_foreign_programs);
 
-                        f = open_memstream_unlocked(&buf, &size);
+                        f = memstream_init(&m);
                         if (!f)
                                 return -ENOMEM;
 
@@ -756,7 +749,7 @@ static int bus_cgroup_set_transient_property(
                                                 bpf_cgroup_attach_type_to_string(fp->attach_type),
                                                 fp->bpffs_path);
 
-                        r = fflush_and_check(f);
+                        r = memstream_finalize(&m, &buf, NULL);
                         if (r < 0)
                                 return r;
 
@@ -1403,9 +1396,9 @@ int bus_cgroup_set_property(
                         return r;
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        _cleanup_(memstream_done) MemStream m = {};
                         _cleanup_free_ char *buf = NULL;
-                        _cleanup_fclose_ FILE *f = NULL;
-                        size_t size = 0;
+                        FILE *f;
 
                         if (n == 0)
                                 LIST_FOREACH(device_limits, a, c->io_device_limits)
@@ -1413,7 +1406,7 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_IO);
 
-                        f = open_memstream_unlocked(&buf, &size);
+                        f = memstream_init(&m);
                         if (!f)
                                 return -ENOMEM;
 
@@ -1422,9 +1415,10 @@ int bus_cgroup_set_property(
                                 if (a->limits[iol_type] != cgroup_io_limit_defaults[iol_type])
                                         fprintf(f, "%s=%s %" PRIu64 "\n", name, a->path, a->limits[iol_type]);
 
-                        r = fflush_and_check(f);
+                        r = memstream_finalize(&m, &buf, NULL);
                         if (r < 0)
                                 return r;
+
                         unit_write_setting(u, flags, name, buf);
                 }
 
@@ -1480,9 +1474,9 @@ int bus_cgroup_set_property(
                         return r;
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        _cleanup_(memstream_done) MemStream m = {};
                         _cleanup_free_ char *buf = NULL;
-                        _cleanup_fclose_ FILE *f = NULL;
-                        size_t size = 0;
+                        FILE *f;
 
                         if (n == 0)
                                 while (c->io_device_weights)
@@ -1490,7 +1484,7 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_IO);
 
-                        f = open_memstream_unlocked(&buf, &size);
+                        f = memstream_init(&m);
                         if (!f)
                                 return -ENOMEM;
 
@@ -1498,9 +1492,10 @@ int bus_cgroup_set_property(
                         LIST_FOREACH(device_weights, a, c->io_device_weights)
                                 fprintf(f, "IODeviceWeight=%s %" PRIu64 "\n", a->path, a->weight);
 
-                        r = fflush_and_check(f);
+                        r = memstream_finalize(&m, &buf, NULL);
                         if (r < 0)
                                 return r;
+
                         unit_write_setting(u, flags, name, buf);
                 }
 
@@ -1553,9 +1548,9 @@ int bus_cgroup_set_property(
                         return r;
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        _cleanup_(memstream_done) MemStream m = {};
                         _cleanup_free_ char *buf = NULL;
-                        _cleanup_fclose_ FILE *f = NULL;
-                        size_t size = 0;
+                        FILE *f;
 
                         if (n == 0)
                                 while (c->io_device_latencies)
@@ -1563,7 +1558,7 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_IO);
 
-                        f = open_memstream_unlocked(&buf, &size);
+                        f = memstream_init(&m);
                         if (!f)
                                 return -ENOMEM;
 
@@ -1572,9 +1567,10 @@ int bus_cgroup_set_property(
                                 fprintf(f, "IODeviceLatencyTargetSec=%s %s\n",
                                         a->path, FORMAT_TIMESPAN(a->target_usec, 1));
 
-                        r = fflush_and_check(f);
+                        r = memstream_finalize(&m, &buf, NULL);
                         if (r < 0)
                                 return r;
+
                         unit_write_setting(u, flags, name, buf);
                 }
 
@@ -1638,9 +1634,9 @@ int bus_cgroup_set_property(
                         return r;
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        _cleanup_(memstream_done) MemStream m = {};
                         _cleanup_free_ char *buf = NULL;
-                        _cleanup_fclose_ FILE *f = NULL;
-                        size_t size = 0;
+                        FILE *f;
 
                         if (n == 0)
                                 LIST_FOREACH(device_bandwidths, a, c->blockio_device_bandwidths) {
@@ -1652,7 +1648,7 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_BLKIO);
 
-                        f = open_memstream_unlocked(&buf, &size);
+                        f = memstream_init(&m);
                         if (!f)
                                 return -ENOMEM;
 
@@ -1668,7 +1664,7 @@ int bus_cgroup_set_property(
                                                 fprintf(f, "BlockIOWriteBandwidth=%s %" PRIu64 "\n", a->path, a->wbps);
                         }
 
-                        r = fflush_and_check(f);
+                        r = memstream_finalize(&m, &buf, NULL);
                         if (r < 0)
                                 return r;
 
@@ -1727,9 +1723,9 @@ int bus_cgroup_set_property(
                         return r;
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        _cleanup_(memstream_done) MemStream m = {};
                         _cleanup_free_ char *buf = NULL;
-                        _cleanup_fclose_ FILE *f = NULL;
-                        size_t size = 0;
+                        FILE *f;
 
                         if (n == 0)
                                 while (c->blockio_device_weights)
@@ -1737,7 +1733,7 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_BLKIO);
 
-                        f = open_memstream_unlocked(&buf, &size);
+                        f = memstream_init(&m);
                         if (!f)
                                 return -ENOMEM;
 
@@ -1745,7 +1741,7 @@ int bus_cgroup_set_property(
                         LIST_FOREACH(device_weights, a, c->blockio_device_weights)
                                 fprintf(f, "BlockIODeviceWeight=%s %" PRIu64 "\n", a->path, a->weight);
 
-                        r = fflush_and_check(f);
+                        r = memstream_finalize(&m, &buf, NULL);
                         if (r < 0)
                                 return r;
 
@@ -1830,9 +1826,9 @@ int bus_cgroup_set_property(
                         return r;
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        _cleanup_(memstream_done) MemStream m = {};
                         _cleanup_free_ char *buf = NULL;
-                        _cleanup_fclose_ FILE *f = NULL;
-                        size_t size = 0;
+                        FILE *f;
 
                         if (n == 0)
                                 while (c->device_allow)
@@ -1840,7 +1836,7 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_DEVICES);
 
-                        f = open_memstream_unlocked(&buf, &size);
+                        f = memstream_init(&m);
                         if (!f)
                                 return -ENOMEM;
 
@@ -1848,9 +1844,10 @@ int bus_cgroup_set_property(
                         LIST_FOREACH(device_allow, a, c->device_allow)
                                 fprintf(f, "DeviceAllow=%s %s%s%s\n", a->path, a->r ? "r" : "", a->w ? "w" : "", a->m ? "m" : "");
 
-                        r = fflush_and_check(f);
+                        r = memstream_finalize(&m, &buf, NULL);
                         if (r < 0)
                                 return r;
+
                         unit_write_setting(u, flags, name, buf);
                 }
 
@@ -1939,14 +1936,15 @@ int bus_cgroup_set_property(
                         return r;
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        _cleanup_(memstream_done) MemStream m = {};
                         _cleanup_free_ char *buf = NULL;
-                        _cleanup_fclose_ FILE *f = NULL;
-                        size_t size = 0;
                         Set **prefixes;
                         bool *reduced;
+                        FILE *f;
 
                         unit_invalidate_cgroup_bpf(u);
-                        f = open_memstream_unlocked(&buf, &size);
+
+                        f = memstream_init(&m);
                         if (!f)
                                 return -ENOMEM;
 
@@ -1971,7 +1969,7 @@ int bus_cgroup_set_property(
                                                 IN_ADDR_PREFIX_TO_STRING(p->family, &p->address, p->prefixlen));
                         }
 
-                        r = fflush_and_check(f);
+                        r = memstream_finalize(&m, &buf, NULL);
                         if (r < 0)
                                 return r;
 
@@ -2100,9 +2098,9 @@ int bus_cgroup_set_property(
                         return r;
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        _cleanup_(memstream_done) MemStream m = {};
                         _cleanup_free_ char *buf = NULL;
-                        _cleanup_fclose_ FILE *f = NULL;
-                        size_t size = 0;
+                        FILE *f;
 
                         if (n == 0)
                                 cgroup_context_remove_socket_bind(list);
@@ -2114,18 +2112,20 @@ int bus_cgroup_set_property(
                                                  "Starting this unit will fail!", u->id);
                         }
 
-                        f = open_memstream_unlocked(&buf, &size);
+                        f = memstream_init(&m);
                         if (!f)
                                 return -ENOMEM;
 
-                        fprintf(f, "%s:", name);
+                        if (n == 0)
+                                fprintf(f, "%s=\n", name);
+                        else
+                                LIST_FOREACH(socket_bind_items, item, *list) {
+                                        fprintf(f, "%s=", name);
+                                        cgroup_context_dump_socket_bind_item(item, f);
+                                        fputc('\n', f);
+                                }
 
-                        LIST_FOREACH(socket_bind_items, item, *list)
-                                cgroup_context_dump_socket_bind_item(item, f);
-
-                        fputc('\n', f);
-
-                        r = fflush_and_check(f);
+                        r = memstream_finalize(&m, &buf, NULL);
                         if (r < 0)
                                 return r;
 

@@ -36,6 +36,7 @@
 #include "macro.h"
 #include "main-func.h"
 #include "memory-util.h"
+#include "memstream-util.h"
 #include "mkdir-label.h"
 #include "parse-util.h"
 #include "process-util.h"
@@ -90,7 +91,7 @@ enum {
         META_ARGV_UID,          /* %u: as seen in the initial user namespace */
         META_ARGV_GID,          /* %g: as seen in the initial user namespace */
         META_ARGV_SIGNAL,       /* %s: number of signal causing dump */
-        META_ARGV_TIMESTAMP,    /* %t: time of dump, expressed as seconds since the Epoch (we expand this to µs granularity) */
+        META_ARGV_TIMESTAMP,    /* %t: time of dump, expressed as seconds since the Epoch (we expand this to μs granularity) */
         META_ARGV_RLIMIT,       /* %c: core file size soft resource limit */
         META_ARGV_HOSTNAME,     /* %h: hostname */
         _META_ARGV_MAX,
@@ -268,11 +269,7 @@ static int fix_permissions(
         (void) fix_acl(fd, uid, allow_user);
         (void) fix_xattr(fd, context);
 
-        r = fsync_full(fd);
-        if (r < 0)
-                return log_error_errno(r, "Failed to sync coredump %s: %m", coredump_tmpfile_name(filename));
-
-        r = link_tmpfile(fd, filename, target, /* replace= */ false);
+        r = link_tmpfile(fd, filename, target, LINK_TMPFILE_SYNC);
         if (r < 0)
                 return log_error_errno(r, "Failed to move coredump %s into place: %m", target);
 
@@ -641,17 +638,16 @@ static int allocate_journal_field(int fd, size_t size, char **ret, size_t *ret_s
  * flags:  0100002
  * EOF
  */
-static int compose_open_fds(pid_t pid, char **open_fds) {
+static int compose_open_fds(pid_t pid, char **ret) {
+        _cleanup_(memstream_done) MemStream m = {};
         _cleanup_closedir_ DIR *proc_fd_dir = NULL;
         _cleanup_close_ int proc_fdinfo_fd = -EBADF;
-        _cleanup_free_ char *buffer = NULL;
-        _cleanup_fclose_ FILE *stream = NULL;
         const char *fddelim = "", *path;
-        size_t size = 0;
+        FILE *stream;
         int r;
 
         assert(pid >= 0);
-        assert(open_fds != NULL);
+        assert(ret);
 
         path = procfs_file_alloca(pid, "fd");
         proc_fd_dir = opendir(path);
@@ -662,7 +658,7 @@ static int compose_open_fds(pid_t pid, char **open_fds) {
         if (proc_fdinfo_fd < 0)
                 return -errno;
 
-        stream = open_memstream_unlocked(&buffer, &size);
+        stream = memstream_init(&m);
         if (!stream)
                 return -ENOMEM;
 
@@ -701,18 +697,7 @@ static int compose_open_fds(pid_t pid, char **open_fds) {
                 }
         }
 
-        errno = 0;
-        stream = safe_fclose(stream);
-
-        if (errno > 0)
-                return -errno;
-
-        if (!buffer)
-                return -ENOMEM;
-
-        *open_fds = TAKE_PTR(buffer);
-
-        return 0;
+        return memstream_finalize(&m, ret, NULL);
 }
 
 static int get_process_ns(pid_t pid, const char *namespace, ino_t *ns) {
@@ -1220,7 +1205,7 @@ static int gather_pid_metadata_from_argv(
                 case META_ARGV_TIMESTAMP:
                         /* The journal fields contain the timestamp padded with six
                          * zeroes, so that the kernel-supplied 1s granularity timestamps
-                         * becomes 1µs granularity, i.e. the granularity systemd usually
+                         * becomes 1μs granularity, i.e. the granularity systemd usually
                          * operates in. */
                         t = free_timestamp = strjoin(argv[i], "000000");
                         if (!t)

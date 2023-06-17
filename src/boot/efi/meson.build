@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
 efi_config_h_dir = meson.current_build_dir()
+efi_addon = ''
 
 if efi_arch != ''
         libefitest = static_library(
@@ -348,8 +349,7 @@ foreach archspec : efi_archspecs
 endforeach
 
 foreach efi_elf_binary : efi_elf_binaries
-        # FIXME: Use build_tgt.name() with meson >= 0.54.0
-        name = fs.name(efi_elf_binary.full_path()).split('.')[0]
+        name = efi_elf_binary.name()
         name += name.startswith('systemd-boot') ? '.efi' : '.efi.stub'
         # For the addon, given it's empty, we need to explicitly reserve space in the header to account for
         # the sections that ukify will add.
@@ -375,6 +375,11 @@ foreach efi_elf_binary : efi_elf_binaries
         boot_targets += exe
         if name.startswith('linux')
                 boot_stubs += exe
+        endif
+
+        # This is supposed to match exactly one time
+        if name == 'addon@0@.efi.stub'.format(efi_arch)
+                efi_addon = exe.full_path()
         endif
 endforeach
 

@@ -1540,7 +1540,7 @@ static int fd_set_attribute(
                 return log_error_errno(procfs_fd, "Failed to re-open '%s': %m", path);
 
         unsigned previous, current;
-        r = chattr_full(NULL, procfs_fd, f, item->attribute_mask, &previous, &current, CHATTR_FALLBACK_BITWISE);
+        r = chattr_full(procfs_fd, NULL, f, item->attribute_mask, &previous, &current, CHATTR_FALLBACK_BITWISE);
         if (r == -ENOANO)
                 log_warning("Cannot set file attributes for '%s', maybe due to incompatibility in specified attributes, "
                             "previous=0x%08x, current=0x%08x, expected=0x%08x, ignoring.",
@@ -3865,7 +3865,7 @@ static int help(void) {
                "     --clean                Clean up marked directories\n"
                "     --remove               Remove marked files/directories\n"
                "     --boot                 Execute actions only safe at boot\n"
-               "     --graceful             Quitely ignore unknown users or groups\n"
+               "     --graceful             Quietly ignore unknown users or groups\n"
                "     --prefix=PATH          Only apply rules with the specified prefix\n"
                "     --exclude-prefix=PATH  Ignore rules with the specified prefix\n"
                "  -E                        Ignore rules prefixed with /dev, /proc, /run, /sys\n"
@@ -4055,7 +4055,7 @@ static int read_config_file(
                 bool ignore_enoent,
                 bool *invalid_config) {
 
-        _cleanup_(hashmap_freep) Hashmap *uid_cache = NULL, *gid_cache = NULL;
+        _cleanup_hashmap_free_ Hashmap *uid_cache = NULL, *gid_cache = NULL;
         _cleanup_fclose_ FILE *_f = NULL;
         _cleanup_free_ char *pp = NULL;
         unsigned v = 0;

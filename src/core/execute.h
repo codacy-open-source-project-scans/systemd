@@ -310,6 +310,7 @@ struct ExecContext {
         ProcSubset proc_subset;    /* subset= */
 
         int private_mounts;
+        int memory_ksm;
         bool private_tmp;
         bool private_network;
         bool private_devices;
@@ -360,6 +361,7 @@ struct ExecContext {
 
         Hashmap *set_credentials; /* output id → ExecSetCredential */
         Hashmap *load_credentials; /* output id → ExecLoadCredential */
+        Set *import_credentials;
 
         ImagePolicy *root_image_policy, *mount_image_policy, *extension_image_policy;
 };

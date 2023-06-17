@@ -304,7 +304,7 @@ int fchmod_opath(int fd, mode_t m) {
 }
 
 int futimens_opath(int fd, const struct timespec ts[2]) {
-        /* Similar to fchmod_path() but for futimens() */
+        /* Similar to fchmod_opath() but for futimens() */
 
         if (utimensat(AT_FDCWD, FORMAT_PROC_FD_PATH(fd), ts, 0) < 0) {
                 if (errno != ENOENT)
@@ -770,7 +770,7 @@ int unlinkat_deallocate(int fd, const char *name, UnlinkDeallocateFlags flags) {
          * punch-hole/truncate this to release the disk space. */
 
         bs = MAX(st.st_blksize, 512);
-        l = DIV_ROUND_UP(st.st_size, bs) * bs; /* Round up to next block size */
+        l = ROUND_UP(st.st_size, bs); /* Round up to next block size */
 
         if (fallocate(truncate_fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, 0, l) >= 0)
                 return 0; /* Successfully punched a hole! 😊 */
@@ -1097,7 +1097,6 @@ int xopenat(int dir_fd, const char *path, int open_flags, XOpenFlags xopen_flags
         int r;
 
         assert(dir_fd >= 0 || dir_fd == AT_FDCWD);
-        assert(path);
 
         if (isempty(path)) {
                 assert(!FLAGS_SET(open_flags, O_CREAT|O_EXCL));

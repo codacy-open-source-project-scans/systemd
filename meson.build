@@ -10,7 +10,7 @@ project('systemd', 'c',
                 'localstatedir=/var',
                 'warning_level=2',
         ],
-        meson_version : '>= 0.53.2',
+        meson_version : '>= 0.60.0',
        )
 
 libsystemd_version = '0.36.0'
@@ -18,7 +18,7 @@ libudev_version = '1.7.6'
 
 conf = configuration_data()
 conf.set_quoted('PROJECT_URL', 'https://systemd.io/')
-conf.set('PROJECT_VERSION',    meson.project_version(),
+conf.set('PROJECT_VERSION', meson.project_version(),
          description : 'Numerical project version (used where a simple number is expected)')
 
 # This is to be used instead of meson.source_root(), as the latter will return
@@ -330,7 +330,7 @@ slow_tests = want_tests != 'false' and get_option('slow-tests')
 fuzz_tests = want_tests != 'false' and get_option('fuzz-tests')
 install_tests = get_option('install-tests')
 
-if add_languages('cpp', required : fuzzer_build)
+if add_languages('cpp', native : false, required : fuzzer_build)
         #  Used only for tests
         cxx = meson.get_compiler('cpp')
         cxx_cmd = ' '.join(cxx.cmd_array())
@@ -527,7 +527,7 @@ has_wstringop_truncation = cc.has_argument('-Wstringop-truncation')
 #####################################################################
 # compilation result tests
 
-conf.set('_GNU_SOURCE', true)
+conf.set('_GNU_SOURCE', 1)
 conf.set('__SANE_USERSPACE_TYPES__', true)
 conf.set10('HAVE_WSTRINGOP_TRUNCATION', has_wstringop_truncation)
 
@@ -735,7 +735,7 @@ foreach prog : progs
                                    '/usr/sbin/' + prog[0],
                                    '/sbin/' + prog[0],
                                    required: false)
-                path = exe.found() ? exe.path() : prog[1]
+                path = exe.found() ? exe.full_path() : prog[1]
         endif
         name = prog.length() > 2 ? prog[2] : prog[0].to_upper()
         conf.set_quoted(name, path)
@@ -1123,7 +1123,7 @@ else
                         r = find_program('clang', required : bpf_framework_required, version : '>= 10.0.0')
                         clang_found = r.found()
                         if clang_found
-                                clang = r.path()
+                                clang = r.full_path()
                         endif
                 else
                         clang_found = true
@@ -1527,7 +1527,7 @@ conf.set10('HAVE_LIBFIDO2', have)
 
 want_tpm2 = get_option('tpm2')
 if want_tpm2 != 'false' and not skip_deps
-        tpm2 = dependency('tss2-esys tss2-rc tss2-mu',
+        tpm2 = dependency('tss2-esys tss2-rc tss2-mu tss2-tcti-device',
                           required : want_tpm2 == 'true')
         have = tpm2.found()
         have_esys3 = tpm2.version().version_compare('>= 3.0.0')
@@ -2173,6 +2173,8 @@ userspace = declare_dependency(
         link_args : userspace_c_ld_args,
 )
 
+man_page_depends = []
+
 ############################################################
 
 # binaries that have --help and are intended for use by humans,
@@ -2213,8 +2215,6 @@ subdir('src/shared')
 subdir('src/udev')
 subdir('src/libudev')
 subdir('src/cryptsetup/cryptsetup-tokens')
-
-alias_target('devel', libsystemd_pc, libudev_pc)
 
 libsystemd = shared_library(
         'systemd',
@@ -2409,6 +2409,8 @@ subdir('src/fuzz')
 subdir('rules.d')
 subdir('test')
 subdir('src/ukify/test')  # needs to be last for test_env variable
+
+alias_target('devel', libsystemd_pc, libudev_pc, systemd_pc, udev_pc)
 
 ############################################################
 
@@ -2917,7 +2919,7 @@ executable(
 
 public_programs += executable(
         'systemd-socket-activate',
-        'src/activate/activate.c',
+        'src/socket-activate/socket-activate.c',
         include_directories : includes,
         link_with : [libshared],
         dependencies : [threads,
@@ -4376,17 +4378,17 @@ executable(
         install : true,
         install_dir : rootlibexecdir)
 
-kernel_install = custom_target(
+kernel_install = executable(
         'kernel-install',
-        input : kernel_install_in,
-        output : 'kernel-install',
-        command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
+        'src/kernel-install/kernel-install.c',
+        include_directories : includes,
+        link_with : [libshared],
+        dependencies : [userspace,
+                        versiondep],
+        install_rpath : rootpkglibdir,
         install : want_kernel_install,
-        install_mode : 'rwxr-xr-x',
         install_dir : bindir)
-if want_kernel_install
-        public_programs += exe
-endif
+public_programs += kernel_install
 
 ukify = custom_target(
         'ukify',
@@ -4397,19 +4399,22 @@ ukify = custom_target(
         install_mode : 'rwxr-xr-x',
         install_dir : rootlibexecdir)
 if want_ukify
-   public_programs += ukify
+        public_programs += ukify
 endif
 
 if want_tests != 'false' and want_kernel_install
-        args = [kernel_install.full_path(), loaderentry_install, uki_copy_install]
+        args = [kernel_install.full_path(), loaderentry_install.full_path(), uki_copy_install]
+        deps = [kernel_install, loaderentry_install]
         if want_ukify and boot_stubs.length() > 0
-                args += [ukify.full_path(), ukify_install, boot_stubs[0]]
+                args += [ukify.full_path(), ukify_install.full_path(), boot_stubs[0]]
+                deps += [ukify, ukify_install, boot_stubs[0]]
         endif
 
         test('test-kernel-install',
              test_kernel_install_sh,
              env : test_env,
-             args : args)
+             args : args,
+             depends: deps)
 endif
 
 ############################################################
@@ -4449,16 +4454,13 @@ foreach test : tests
                 versiondep,
         ]
 
-        # FIXME: Use fs.stem() with meson >= 0.54.0
-        name = '@0@'.format(sources[0]).split('/')[-1]
+        name = fs.stem(sources[0])
         if not name.endswith('.cc')
                 deps += [userspace]
         endif
         name = name.split('.')[0]
 
-        suite = fs.name(fs.parent('@0@'.format(sources[0])))
-        # FIXME: Use str.replace() with meson >= 0.58.0
-        suite = suite.split('sd-')[-1]
+        suite = fs.name(fs.parent(sources[0])).replace('sd-', '')
 
         if condition != '' and conf.get(condition) == 0
                 message('Not compiling @0@ because @1@ is not true'.format(name, condition))
@@ -4589,8 +4591,7 @@ foreach fuzzer : fuzzers
         endif
         sources += fuzz_generated_directives
 
-        # FIXME: Use fs.stem() with meson >= 0.54.0
-        name = '@0@'.format(sources[0]).split('/')[-1].split('.')[0]
+        name = fs.stem(sources[0])
 
         exe = executable(
                 name,
@@ -4694,7 +4695,7 @@ check_help = find_program('tools/check-help.sh')
 check_version = find_program('tools/check-version.sh')
 
 foreach exec : public_programs
-        name = exec.full_path().split('/')[-1]
+        name = fs.name(exec.full_path())
         if want_tests != 'false'
                 test('check-help-' + name,
                      check_help,

@@ -16,11 +16,8 @@ if install_tests
                 'testsuite-04.units',
                 'testsuite-06.units',
                 'testsuite-07.units',
-                'testsuite-10.units',
-                'testsuite-11.units',
                 'testsuite-16.units',
                 'testsuite-23.units',
-                'testsuite-28.units',
                 'testsuite-30.units',
                 'testsuite-52.units',
                 'testsuite-63.units',
@@ -155,9 +152,7 @@ if want_tests != 'false' and dmi_arches.contains(host_machine.cpu_family())
 
         foreach p : out.stdout().split()
                 source = project_source_root / p
-                name = 'dmidecode_' + p.split('/')[-1].split('.')[0]
-
-                test(name,
+                test('dmidecode_' + fs.stem(p),
                      udev_dmi_memory_id_test,
                      suite : 'dist',
                      args : [udev_prog_paths['dmi_memory_id'].full_path(),

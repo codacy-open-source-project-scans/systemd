@@ -130,7 +130,7 @@ endif
 
 udev_prog_paths = {}
 foreach prog : udev_progs
-        name = prog[0].split('/')[0]
+        name = fs.stem(prog[0])
 
         exe = executable(
                 name,
@@ -154,12 +154,13 @@ if install_sysconfdir_samples
                      install_dir : sysconfdir / 'udev')
 endif
 
-custom_target(
+udev_pc = custom_target(
         'udev.pc',
         input : 'udev.pc.in',
         output : 'udev.pc',
         command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
         install : pkgconfigdatadir != 'no',
+        install_tag : 'devel',
         install_dir : pkgconfigdatadir)
 
 if install_sysconfdir

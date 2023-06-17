@@ -1003,13 +1003,24 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
           <term><command>mask <replaceable>UNIT</replaceable>…</command></term>
 
           <listitem>
-            <para>Mask one or more units, as specified on the command line. This will link these unit files to
-            <filename>/dev/null</filename>, making it impossible to start them. This is a stronger version of
-            <command>disable</command>, since it prohibits all kinds of activation of the unit, including enablement
-            and manual activation. Use this option with care. This honors the <option>--runtime</option> option to only
-            mask temporarily until the next reboot of the system. The <option>--now</option> option may be used to
-            ensure that the units are also stopped. This command expects valid unit names only, it does not accept unit
-            file paths.</para>
+            <para>Mask one or more units, as specified on the command line. This will link these unit files
+            to <filename>/dev/null</filename>, making it impossible to start them. This is a stronger version
+            of <command>disable</command>, since it prohibits all kinds of activation of the unit, including
+            enablement and manual activation. Use this option with care. This honors the
+            <option>--runtime</option> option to only mask temporarily until the next reboot of the
+            system. The <option>--now</option> option may be used to ensure that the units are also
+            stopped. This command expects valid unit names only, it does not accept unit file paths.</para>
+
+            <para>Note that this will create a symlink under the unit's name in
+            <filename>/etc/systemd/system/</filename> (in case <option>--runtime</option> is not specified)
+            or <filename>/run/systemd/system/</filename> (in case <option>--runtime</option> is
+            specified). If a matching unit file already exists under these directories this operation will
+            hence fail. This means that the operation is primarily useful to mask units shipped by the vendor
+            (as those are shipped in <filename>/usr/lib/systemd/system/</filename> and not the aforementioned
+            two directories), but typically doesn't work for units created locally (as those are typically
+            placed precisely in the two aforementioned directories). Similar restrictions apply for
+            <option>--user</option> mode, in which case the directories are below the user's home directory
+            however.</para>
           </listitem>
         </varlistentry>
 
@@ -1556,6 +1567,24 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
 
             <para>This command honors <option>--force</option> and <option>--when=</option> similarly
             to <command>halt</command>.</para>
+          </listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term><command>soft-reboot</command></term>
+
+          <listitem>
+            <para>Shut down and reboot userspace. This is equivalent to <command>systemctl start
+            soft-reboot.target --job-mode=replace-irreversibly --no-block</command>. This command is
+            asynchronous; it will return after the reboot operation is enqueued, without waiting for it to
+            complete.</para>
+
+            <para>This command honors <option>--force</option> and <option>--when=</option> in a similar way
+            as <command>halt</command>.</para>
+
+            <para>This operation only reboots userspace, leaving the kernel running. See
+            <citerefentry><refentrytitle>systemd-soft-reboot.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+            for details.</para>
           </listitem>
         </varlistentry>
 
@@ -2435,7 +2464,7 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
           <variablelist>
             <varlistentry>
               <term><option>us</option></term>
-              <term><option>µs</option></term>
+              <term><option>μs</option></term>
               <listitem><para><literal>Day YYYY-MM-DD HH:MM:SS.UUUUUU TZ</literal></para></listitem>
             </varlistentry>
           </variablelist>
@@ -2450,7 +2479,7 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
           <variablelist>
             <varlistentry>
               <term><option>us+utc</option></term>
-              <term><option>µs+utc</option></term>
+              <term><option>μs+utc</option></term>
               <listitem><para><literal>Day YYYY-MM-DD HH:MM:SS.UUUUUU UTC</literal></para></listitem>
             </varlistentry>
           </variablelist>
