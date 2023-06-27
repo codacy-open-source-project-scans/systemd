@@ -201,6 +201,26 @@
       </varlistentry>
 
       <varlistentry>
+        <term><varname>RootEphemeral=</varname></term>
+
+        <listitem><para>Takes a boolean argument. If enabled, executed processes will run in an ephemeral
+        copy of the root directory or root image. The ephemeral copy is placed in
+        <filename>/var/lib/systemd/ephemeral-trees/</filename> while the service is active and is cleaned up
+        when the service is stopped or restarted. If <varname>RootDirectory=</varname> is used and the root
+        directory is a subvolume, the ephemeral copy will be created by making a snapshot of the subvolume.
+        </para>
+
+        <para>To make sure making ephemeral copies can be made efficiently, the root directory or root image
+        should be located on the same filesystem as <filename>/var/lib/systemd/ephemeral-trees/</filename>.
+        When using <varname>RootEphemeral=</varname> with root directories, btrfs should be used as the
+        filesystem and the root directory should ideally be a subvolume which <command>systemd</command> can
+        snapshot to make the ephemeral copy. For root images, a filesystem with support for reflinks should
+        be used to ensure an efficient ephemeral copy.</para>
+
+        <xi:include href="system-only.xml" xpointer="singular"/></listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><varname>RootHash=</varname></term>
 
         <listitem><para>Takes a data integrity (dm-verity) root hash specified in hexadecimal, or the path to a file
@@ -3300,9 +3320,15 @@ StandardInputData=V2XigLJyZSBubyBzdHJhbmdlcnMgdG8gbG92ZQpZb3Uga25vdyB0aGUgcnVsZX
         <filename>/usr/lib/credstore.encrypted/</filename> in that order. When multiple credentials of the
         same name are found, the first one found is used.</para>
 
+        <para>The globbing expression implements a restrictive subset of <citerefentry
+        project='man-pages'><refentrytitle>glob</refentrytitle><manvolnum>7</manvolnum></citerefentry>: only
+        a single trailing <literal>*</literal> wildcard may be specified. Both <literal>?</literal> and
+        <literal>[]</literal> wildcards are not permitted, nor are <literal>*</literal> wildcards anywhere
+        except at the end of the glob expression.</para>
+
         <para>When multiple credentials of the same name are found, credentials found by
         <varname>LoadCredential=</varname> and <varname>LoadCredentialEncrypted=</varname> take priority over
-        credentials found by <varname>ImportCredential=</varname></para></listitem>.
+        credentials found by <varname>ImportCredential=</varname>.</para></listitem>
       </varlistentry>
 
       <varlistentry>

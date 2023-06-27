@@ -5257,7 +5257,7 @@ static int run_container(
                 if (r == 0) {
                         _cleanup_close_ int parent_netns_fd = -EBADF;
 
-                        r = namespace_open(getpid(), NULL, NULL, &parent_netns_fd, NULL, NULL);
+                        r = namespace_open(getpid_cached(), NULL, NULL, &parent_netns_fd, NULL, NULL);
                         if (r < 0) {
                                 log_error_errno(r, "Failed to open parent network namespace: %m");
                                 _exit(EXIT_FAILURE);
@@ -5826,8 +5826,9 @@ static int run(int argc, char *argv[]) {
 
         assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGCHLD, SIGWINCH, SIGTERM, SIGINT, SIGRTMIN+18, -1) >= 0);
 
-        if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) < 0) {
-                r = log_error_errno(errno, "Failed to become subreaper: %m");
+        r = make_reaper_process(true);
+        if (r < 0) {
+                log_error_errno(r, "Failed to become subreaper: %m");
                 goto finish;
         }
 

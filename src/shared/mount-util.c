@@ -459,7 +459,7 @@ static int mount_switch_root_pivot(int fd_newroot, const char *path) {
 
         /* Change into the new rootfs. */
         if (fchdir(fd_newroot) < 0)
-                return log_debug_errno(errno, "Failed to change into new rootfs '%s': %m", path);
+                return log_debug_errno(errno, "Failed to chdir into new rootfs '%s': %m", path);
 
         /* Let the kernel tuck the new root under the old one. */
         if (pivot_root(".", ".") < 0)
@@ -479,13 +479,13 @@ static int mount_switch_root_move(int fd_newroot, const char *path) {
 
         /* Change into the new rootfs. */
         if (fchdir(fd_newroot) < 0)
-                return log_debug_errno(errno, "Failed to change into new rootfs '%s': %m", path);
+                return log_debug_errno(errno, "Failed to chdir into new rootfs '%s': %m", path);
 
         /* Move the new root fs */
         if (mount(".", "/", NULL, MS_MOVE, NULL) < 0)
                 return log_debug_errno(errno, "Failed to move new rootfs '%s': %m", path);
 
-        /* Also change chroot dir */
+        /* Also change root dir */
         if (chroot(".") < 0)
                 return log_debug_errno(errno, "Failed to chroot to new rootfs '%s': %m", path);
 
@@ -567,42 +567,21 @@ int mode_to_inaccessible_node(
          * we operate in system context and $XDG_RUNTIME_DIR if we operate in user context. */
 
         _cleanup_free_ char *d = NULL;
-        const char *node = NULL;
+        const char *node;
 
         assert(ret);
 
         if (!runtime_dir)
                 runtime_dir = "/run";
 
-        switch (mode & S_IFMT) {
-                case S_IFREG:
-                        node = "/systemd/inaccessible/reg";
-                        break;
+        if (S_ISLNK(mode))
+                return -EINVAL;
 
-                case S_IFDIR:
-                        node = "/systemd/inaccessible/dir";
-                        break;
-
-                case S_IFCHR:
-                        node = "/systemd/inaccessible/chr";
-                        break;
-
-                case S_IFBLK:
-                        node = "/systemd/inaccessible/blk";
-                        break;
-
-                case S_IFIFO:
-                        node = "/systemd/inaccessible/fifo";
-                        break;
-
-                case S_IFSOCK:
-                        node = "/systemd/inaccessible/sock";
-                        break;
-        }
+        node = inode_type_to_string(mode);
         if (!node)
                 return -EINVAL;
 
-        d = path_join(runtime_dir, node);
+        d = path_join(runtime_dir, "systemd/inaccessible", node);
         if (!d)
                 return -ENOMEM;
 
@@ -1251,7 +1230,11 @@ static void sub_mount_drop(SubMount *s, size_t n) {
         }
 }
 
-static int get_sub_mounts(const char *prefix, SubMount **ret_mounts, size_t *ret_n_mounts) {
+static int get_sub_mounts(
+                const char *prefix,
+                bool clone_tree,
+                SubMount **ret_mounts,
+                size_t *ret_n_mounts) {
         _cleanup_(mnt_free_tablep) struct libmnt_table *table = NULL;
         _cleanup_(mnt_free_iterp) struct libmnt_iter *iter = NULL;
         SubMount *mounts = NULL;
@@ -1301,12 +1284,15 @@ static int get_sub_mounts(const char *prefix, SubMount **ret_mounts, size_t *ret
                         continue;
                 }
 
-                mount_fd = open_tree(AT_FDCWD, path, OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE);
+                if (clone_tree)
+                        mount_fd = open_tree(AT_FDCWD, path, OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE);
+                else
+                        mount_fd = open(path, O_CLOEXEC|O_PATH);
                 if (mount_fd < 0) {
                         if (errno == ENOENT) /* The path may be hidden by another over-mount or already unmounted. */
                                 continue;
 
-                        return log_debug_errno(errno, "Failed to open tree of mounted filesystem '%s': %m", path);
+                        return log_debug_errno(errno, "Failed to open subtree of mounted filesystem '%s': %m", path);
                 }
 
                 p = strdup(path);
@@ -1353,8 +1339,8 @@ int remount_and_move_sub_mounts(
                 unsigned long flags,
                 const char *options) {
 
-        SubMount *mounts = NULL; /* avoid false maybe-uninitialized warning */
-        size_t n = 0; /* avoid false maybe-uninitialized warning */
+        SubMount *mounts = NULL;
+        size_t n = 0;
         int r;
 
         CLEANUP_ARRAY(mounts, n, sub_mount_array_free);
@@ -1374,7 +1360,7 @@ int remount_and_move_sub_mounts(
                 return mount_nofollow_verbose(LOG_DEBUG, what, where, type, flags, options);
 
         /* Get the list of sub-mounts and duplicate them. */
-        r = get_sub_mounts(where, &mounts, &n);
+        r = get_sub_mounts(where, /* clone_tree= */ true, &mounts, &n);
         if (r < 0)
                 return r;
 
@@ -1388,6 +1374,57 @@ int remount_and_move_sub_mounts(
 
         /* Finally, move the all sub-mounts on the new target mount point. */
         return move_sub_mounts(mounts, n);
+}
+
+int bind_mount_submounts(
+                const char *source,
+                const char *target) {
+
+        SubMount *mounts = NULL;
+        size_t n = 0;
+        int ret = 0, r;
+
+        /* Bind mounts all child mounts of 'source' to 'target'. Useful when setting up a new procfs instance
+         * with new mount options to copy the original submounts over. */
+
+        assert(source);
+        assert(target);
+
+        CLEANUP_ARRAY(mounts, n, sub_mount_array_free);
+
+        r = get_sub_mounts(source, /* clone_tree= */ false, &mounts, &n);
+        if (r < 0)
+                return r;
+
+        FOREACH_ARRAY(m, mounts, n) {
+                _cleanup_free_ char *t = NULL;
+                const char *suffix;
+
+                if (isempty(m->path))
+                        continue;
+
+                assert_se(suffix = path_startswith(m->path, source));
+
+                t = path_join(target, suffix);
+                if (!t)
+                        return -ENOMEM;
+
+                r = path_is_mount_point(t, NULL, 0);
+                if (r < 0) {
+                        log_debug_errno(r, "Failed to detect if '%s' already is a mount point, ignoring: %m", t);
+                        continue;
+                }
+                if (r > 0) {
+                        log_debug("Not bind mounting '%s' from '%s' to '%s', since there's already a mountpoint.", suffix, source, target);
+                        continue;
+                }
+
+                r = mount_follow_verbose(LOG_DEBUG, FORMAT_PROC_FD_PATH(m->mount_fd), t, NULL, MS_BIND|MS_REC, NULL);
+                if (r < 0 && ret == 0)
+                        ret = r;
+        }
+
+        return ret;
 }
 
 int remount_sysfs(const char *where) {

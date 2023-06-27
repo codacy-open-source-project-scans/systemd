@@ -2,6 +2,7 @@
 #pragma once
 
 #include <linux/fiemap.h>
+#include <sys/types.h>
 
 #include "hashmap.h"
 #include "time-util.h"
@@ -28,10 +29,17 @@ typedef struct SleepConfig {
 SleepConfig* free_sleep_config(SleepConfig *sc);
 DEFINE_TRIVIAL_CLEANUP_FUNC(SleepConfig*, free_sleep_config);
 
+typedef enum SwapType {
+        SWAP_BLOCK,
+        SWAP_FILE,
+        _SWAP_TYPE_MAX,
+        _SWAP_TYPE_INVALID = -EINVAL,
+} SwapType;
+
 /* entry in /proc/swaps */
 typedef struct SwapEntry {
-        char *device;
-        char *type;
+        char *path;
+        SwapType type;
         uint64_t size;
         uint64_t used;
         int priority;
@@ -46,7 +54,7 @@ DEFINE_TRIVIAL_CLEANUP_FUNC(SwapEntry*, swap_entry_free);
  */
 typedef struct HibernateLocation {
         dev_t devno;
-        uint64_t offset;
+        uint64_t offset; /* in memory pages */
         SwapEntry *swap;
 } HibernateLocation;
 
@@ -56,6 +64,7 @@ DEFINE_TRIVIAL_CLEANUP_FUNC(HibernateLocation*, hibernate_location_free);
 int read_fiemap(int fd, struct fiemap **ret);
 int parse_sleep_config(SleepConfig **sleep_config);
 int find_hibernate_location(HibernateLocation **ret_hibernate_location);
+int write_resume_config(dev_t devno, uint64_t offset, const char *device);
 
 int can_sleep(SleepOperation operation);
 int can_sleep_disk(char **types);

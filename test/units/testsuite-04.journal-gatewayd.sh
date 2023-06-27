@@ -37,11 +37,8 @@ curl -Lfs --header "Accept: text/plain" http://localhost:19531/entries | \
     grep -qE " $TEST_TAG\[[0-9]+\]: $TEST_MESSAGE"
 curl -Lfs --header "Accept: application/json" http://localhost:19531/entries | \
     jq -se ".[] | select(.MESSAGE == \"$TEST_MESSAGE\")"
-# FIXME: drop the condition once https://github.com/systemd/systemd/issues/28059 is resolved
-if ! systemd-detect-virt -cq; then
-    curl -Lfs --header "Accept: application/json" http://localhost:19531/entries?boot | \
-        jq -se ".[] | select(.MESSAGE == \"$TEST_MESSAGE\")"
-fi
+curl -Lfs --header "Accept: application/json" http://localhost:19531/entries?boot | \
+    jq -se ".[] | select(.MESSAGE == \"$TEST_MESSAGE\")"
 curl -Lfs --header "Accept: application/json" http://localhost:19531/entries?SYSLOG_IDENTIFIER="$TEST_TAG" | \
     jq -se "length == 1 and select(.[].MESSAGE == \"$TEST_MESSAGE\")"
 # Show 10 entries starting from $BOOT_CURSOR, skip the first 5
@@ -57,7 +54,13 @@ curl -Lfs --header "Accept: text/event-stream" http://localhost:19531/entries | 
 # Same thing as journalctl --output=export
 mkdir /tmp/remote-journal
 curl -Lfs --header "Accept: application/vnd.fdo.journal" http://localhost:19531/entries | \
-    /usr/lib/systemd/systemd-journal-remote -o /tmp/remote-journal/system.journal --split-mode=none -
+    /usr/lib/systemd/systemd-journal-remote --output=/tmp/remote-journal/system.journal --split-mode=none -
+journalctl --directory=/tmp/remote-journal -t "$TEST_TAG" --grep "$TEST_MESSAGE"
+rm -rf /tmp/remote-journal/*
+# Let's do the same thing again, but let systemd-journal-remote spawn curl itself
+/usr/lib/systemd/systemd-journal-remote --url=http://localhost:19531/entries \
+                                        --output=/tmp/remote-journal/system.journal \
+                                        --split-mode=none
 journalctl --directory=/tmp/remote-journal -t "$TEST_TAG" --grep "$TEST_MESSAGE"
 rm -rf /tmp/remote-journal
 
