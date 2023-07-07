@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
 project('systemd', 'c',
-        version : '253',
+        version : '254',
         license : 'LGPLv2+',
         default_options: [
                 'c_std=gnu11',
@@ -13,8 +13,8 @@ project('systemd', 'c',
         meson_version : '>= 0.60.0',
        )
 
-libsystemd_version = '0.36.0'
-libudev_version = '1.7.6'
+libsystemd_version = '0.37.0'
+libudev_version = '1.7.7'
 
 conf = configuration_data()
 conf.set_quoted('PROJECT_URL', 'https://systemd.io/')
@@ -1054,14 +1054,18 @@ if default_user_path != ''
         conf.set_quoted('DEFAULT_USER_PATH', default_user_path)
 endif
 
-
 #####################################################################
 
 threads = dependency('threads')
 librt = cc.find_library('rt')
 libm = cc.find_library('m')
 libdl = cc.find_library('dl')
-libcrypt = cc.find_library('crypt')
+libcrypt = dependency('libcrypt', 'libxcrypt', required : false)
+if not libcrypt.found()
+        # fallback to use find_library() if libcrypt is provided by glibc, e.g. for LibreELEC.
+        libcrypt = cc.find_library('crypt')
+endif
+libcap = dependency('libcap')
 
 # On some architectures, libatomic is required. But on some installations,
 # it is found, but actual linking fails. So let's try to use it opportunistically.
@@ -1084,12 +1088,6 @@ foreach ident : [
                                dependencies : libcrypt)
         conf.set10('HAVE_' + ident[0].to_upper(), have)
 endforeach
-
-libcap = dependency('libcap', required : false)
-if not libcap.found()
-        # Compat with Ubuntu 14.04 which ships libcap w/o .pc file
-        libcap = cc.find_library('cap')
-endif
 
 want_bpf_framework = get_option('bpf-framework')
 bpf_compiler = get_option('bpf-compiler')
@@ -1195,15 +1193,32 @@ else
 endif
 conf.set10('HAVE_LIBFDISK', have)
 
+want_passwdqc = get_option('passwdqc')
 want_pwquality = get_option('pwquality')
-if want_pwquality != 'false' and not skip_deps
-        libpwquality = dependency('pwquality', required : want_pwquality == 'true')
+if want_passwdqc == 'true' and want_pwquality == 'true'
+        error('passwdqc and pwquality cannot be requested simultaneously')
+endif
+
+if want_pwquality != 'false' and want_passwdqc != 'true' and not skip_deps
+        libpwquality = dependency('pwquality',
+                                  version : '>= 1.4.1',
+                                  required : want_pwquality == 'true')
         have = libpwquality.found()
 else
         have = false
         libpwquality = []
 endif
 conf.set10('HAVE_PWQUALITY', have)
+
+if not have and want_passwdqc != 'false' and not skip_deps
+        libpasswdqc = dependency('passwdqc',
+                                 required : want_passwdqc == 'true')
+        have = libpasswdqc.found()
+else
+        have = false
+        libpasswdqc = []
+endif
+conf.set10('HAVE_PASSWDQC', have)
 
 want_seccomp = get_option('seccomp')
 if want_seccomp != 'false' and not skip_deps
@@ -1269,7 +1284,7 @@ conf.set10('ENABLE_POLKIT', install_polkit)
 
 want_acl = get_option('acl')
 if want_acl != 'false' and not skip_deps
-        libacl = cc.find_library('acl', required : want_acl == 'true')
+        libacl = dependency('libacl', required : want_acl == 'true')
         have = libacl.found()
 else
         have = false
@@ -1326,8 +1341,15 @@ conf.set10('HAVE_XENCTRL', have)
 
 want_pam = get_option('pam')
 if want_pam != 'false' and not skip_deps
-        libpam = cc.find_library('pam', required : want_pam == 'true')
-        libpam_misc = cc.find_library('pam_misc', required : want_pam == 'true')
+        libpam = dependency('pam', required : false)
+        if not libpam.found()
+                # Debian older than bookworm and Ubuntu older than 22.10 do not provide the .pc file.
+                libpam = cc.find_library('pam', required : want_pam == 'true')
+        endif
+        libpam_misc = dependency('pam_misc', required : false)
+        if not libpam_misc.found()
+                libpam_misc = cc.find_library('pam_misc', required : want_pam == 'true')
+        endif
         have = libpam.found() and libpam_misc.found()
 else
         have = false
@@ -1456,8 +1478,12 @@ conf.set10('HAVE_QRENCODE', have)
 
 want_gcrypt = get_option('gcrypt')
 if want_gcrypt != 'false' and not skip_deps
-        libgcrypt = cc.find_library('gcrypt', required : want_gcrypt == 'true')
-        libgpg_error = cc.find_library('gpg-error', required : want_gcrypt == 'true')
+        libgcrypt = dependency('libgcrypt', required : want_gcrypt == 'true')
+        libgpg_error = dependency('gpg-error', required : false)
+        if not libgpg_error.found()
+                # CentOS 8 does not provide the .pc file.
+                libgpg_error = cc.find_library('gpg-error', required : want_gcrypt == 'true')
+        endif
         have = libgcrypt.found() and libgpg_error.found()
 else
         have = false
@@ -1567,8 +1593,11 @@ conf.set10('HAVE_ZLIB', have)
 
 want_bzip2 = get_option('bzip2')
 if want_bzip2 != 'false' and not skip_deps
-        libbzip2 = cc.find_library('bz2',
-                                   required : want_bzip2 == 'true')
+        libbzip2 = dependency('bzip2', required : false)
+        if not libbzip2.found()
+                # Debian and Ubuntu do not provide the .pc file.
+                libbzip2 = cc.find_library('bz2', required : want_bzip2 == 'true')
+        endif
         have = libbzip2.found()
 else
         have = false
@@ -3845,6 +3874,16 @@ public_programs += executable(
         install : true,
         install_dir : rootbindir)
 
+public_programs += executable(
+        'systemd-battery-check',
+        'src/battery-check/battery-check.c',
+        include_directories : includes,
+        link_with : [libshared],
+        dependencies : [userspace, versiondep],
+        install_rpath : rootpkglibdir,
+        install_dir : rootlibexecdir,
+        install : true)
+
 # Protecting files from the distro in /usr doesn't make sense since they can be trivially accessed otherwise,
 # so don't restrict the access mode in /usr. That doesn't apply to /etc, so we do restrict the access mode
 # there.
@@ -4747,7 +4786,6 @@ foreach tuple : fuzz_sanitizers
         endif
 endforeach
 
-
 ############################################################
 
 if git.found()
@@ -4921,6 +4959,7 @@ foreach tuple : [
         ['microhttpd'],
         ['openssl'],
         ['p11kit'],
+        ['passwdqc'],
         ['pcre2'],
         ['pwquality'],
         ['qrencode'],

@@ -8,6 +8,7 @@
 #include "bus-error.h"
 #include "bus-locator.h"
 #include "chase.h"
+#include "creds-util.h"
 #include "efi-loader.h"
 #include "env-util.h"
 #include "fd-util.h"
@@ -606,6 +607,12 @@ static int add_mount(
         if (r < 0)
                 return r;
 
+        if (in_initrd() && path_equal(where, "/sysroot") && is_device_path(what)) {
+                r = generator_write_initrd_root_device_deps(dest, what);
+                if (r < 0)
+                        return r;
+        }
+
         r = write_mount_timeout(f, where, opts);
         if (r < 0)
                 return r;
@@ -896,12 +903,6 @@ static int parse_fstab_one(
                         mount_is_network(fstype, options) ? SPECIAL_REMOTE_FS_TARGET :
                                                             SPECIAL_LOCAL_FS_TARGET;
 
-        if (is_sysroot && is_device_path(what)) {
-                r = generator_write_initrd_root_device_deps(arg_dest, what);
-                if (r < 0)
-                        return r;
-        }
-
         r = add_mount(source,
                       arg_dest,
                       what,
@@ -1089,12 +1090,6 @@ static int add_sysroot_mount(void) {
 
         log_debug("Found entry what=%s where=/sysroot type=%s opts=%s", what, strna(arg_root_fstype), strempty(opts));
 
-        if (is_device_path(what)) {
-                r = generator_write_initrd_root_device_deps(arg_dest, what);
-                if (r < 0)
-                        return r;
-        }
-
         makefs = fstab_test_option(opts, "x-systemd.makefs\0");
         flags = makefs * MOUNT_MAKEFS;
 
@@ -1274,6 +1269,40 @@ static int add_mounts_from_cmdline(void) {
                               /* passno = */ 0,
                               /* initrd = */ false,
                               /* use_swap_enabled = */ false);
+                if (r < 0 && ret >= 0)
+                        ret = r;
+        }
+
+        return ret;
+}
+
+static int add_mounts_from_creds(void) {
+        _cleanup_free_ void *b = NULL;
+        struct mntent *me;
+        int r, ret = 0;
+        size_t bs;
+
+        r = read_credential_with_decryption(
+                        in_initrd() ? "fstab.extra.initrd" : "fstab.extra",
+                        &b, &bs);
+        if (r <= 0)
+                return r;
+
+        _cleanup_fclose_ FILE *f = NULL;
+        f = fmemopen_unlocked(b, bs, "r");
+        if (!f)
+                return log_oom();
+
+        while ((me = getmntent(f))) {
+                r = parse_fstab_one(
+                                "/run/credentials",
+                                me->mnt_fsname,
+                                me->mnt_dir,
+                                me->mnt_type,
+                                me->mnt_opts,
+                                me->mnt_passno,
+                                /* initrd = */ false,
+                                /* use_swap_enabled = */ true);
                 if (r < 0 && ret >= 0)
                         ret = r;
         }
@@ -1466,7 +1495,7 @@ static int run_generator(void) {
         (void) determine_usr();
 
         if (arg_sysroot_check) {
-                r = parse_fstab(true);
+                r = parse_fstab(/* initrd= */ true);
                 if (r == 0)
                         log_debug("Nothing interesting found, not doing daemon-reload.");
                 if (r > 0)
@@ -1496,13 +1525,13 @@ static int run_generator(void) {
         /* Honour /etc/fstab only when that's enabled */
         if (arg_fstab_enabled) {
                 /* Parse the local /etc/fstab, possibly from the initrd */
-                r = parse_fstab(false);
+                r = parse_fstab(/* initrd= */ false);
                 if (r < 0 && ret >= 0)
                         ret = r;
 
                 /* If running in the initrd also parse the /etc/fstab from the host */
                 if (in_initrd())
-                        r = parse_fstab(true);
+                        r = parse_fstab(/* initrd= */ true);
                 else
                         r = generator_enable_remount_fs_service(arg_dest);
                 if (r < 0 && ret >= 0)
@@ -1510,6 +1539,10 @@ static int run_generator(void) {
         }
 
         r = add_mounts_from_cmdline();
+        if (r < 0 && ret >= 0)
+                ret = r;
+
+        r = add_mounts_from_creds();
         if (r < 0 && ret >= 0)
                 ret = r;
 

@@ -34,6 +34,7 @@
 #include "chase.h"
 #include "clock-util.h"
 #include "conf-parser.h"
+#include "confidential-virt.h"
 #include "cpu-set-util.h"
 #include "crash-handler.h"
 #include "dbus-manager.h"
@@ -1860,12 +1861,16 @@ static int do_reexecute(
                 xsprintf(sfd, "--deserialize=%i", fileno(arg_serialization));
 
                 i = 1;         /* Leave args[0] empty for now. */
-                filter_args(args, &i, argv, argc);
 
+                /* Put our stuff first to make sure it always gets parsed in case
+                 * we get weird stuff from the kernel cmdline (like --) */
                 if (IN_SET(objective, MANAGER_SWITCH_ROOT, MANAGER_SOFT_REBOOT))
                         args[i++] = "--switched-root";
                 args[i++] = runtime_scope_cmdline_option_to_string(arg_runtime_scope);
                 args[i++] = sfd;
+
+                filter_args(args, &i, argv, argc);
+
                 args[i++] = NULL;
 
                 assert(i <= args_size);
@@ -2116,6 +2121,10 @@ static void log_execution_mode(bool *ret_first_boot) {
                 if (v > 0)
                         log_info("Detected virtualization %s.", virtualization_to_string(v));
 
+                v = detect_confidential_virtualization();
+                if (v > 0)
+                        log_info("Detected confidential virtualization %s.", confidential_virtualization_to_string(v));
+
                 log_info("Detected architecture %s.", architecture_to_string(uname_architecture()));
 
                 if (in_initrd())
@@ -2220,10 +2229,15 @@ static int initialize_runtime(
                                 return r;
                         }
 
+                        /* Pull credentials from various sources into a common credential directory (we do
+                         * this here, before setting up the machine ID, so that we can use credential info
+                         * for setting up the machine ID) */
+                        (void) import_credentials();
+
                         (void) os_release_status();
                         (void) hostname_setup(true);
                         /* Force transient machine-id on first boot. */
-                        machine_id_setup(NULL, /* force_transient= */ first_boot, arg_machine_id, NULL);
+                        machine_id_setup(/* root= */ NULL, /* force_transient= */ first_boot, arg_machine_id, /* ret_machine_id */ NULL);
                         (void) loopback_setup();
                         bump_unix_max_dgram_qlen();
                         bump_file_max_and_nr_open();
@@ -2301,10 +2315,6 @@ static int initialize_runtime(
         /* Bump up RLIMIT_NOFILE for systemd itself */
         (void) bump_rlimit_nofile(saved_rlimit_nofile);
         (void) bump_rlimit_memlock(saved_rlimit_memlock);
-
-        /* Pull credentials from various sources into a common credential directory */
-        if (arg_runtime_scope == RUNTIME_SCOPE_SYSTEM && !skip_setup)
-                (void) import_credentials();
 
         return 0;
 }

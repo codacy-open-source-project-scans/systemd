@@ -32,6 +32,7 @@
 #include "clean-ipc.h"
 #include "clock-util.h"
 #include "common-signal.h"
+#include "confidential-virt.h"
 #include "constants.h"
 #include "core-varlink.h"
 #include "creds-util.h"
@@ -720,9 +721,9 @@ static int manager_setup_prefix(Manager *m) {
 
         static const struct table_entry paths_user[_EXEC_DIRECTORY_TYPE_MAX] = {
                 [EXEC_DIRECTORY_RUNTIME] =       { SD_PATH_USER_RUNTIME,       NULL  },
-                [EXEC_DIRECTORY_STATE] =         { SD_PATH_USER_CONFIGURATION, NULL  },
+                [EXEC_DIRECTORY_STATE] =         { SD_PATH_USER_STATE_PRIVATE, NULL  },
                 [EXEC_DIRECTORY_CACHE] =         { SD_PATH_USER_STATE_CACHE,   NULL  },
-                [EXEC_DIRECTORY_LOGS] =          { SD_PATH_USER_CONFIGURATION, "log" },
+                [EXEC_DIRECTORY_LOGS] =          { SD_PATH_USER_STATE_PRIVATE, "log" },
                 [EXEC_DIRECTORY_CONFIGURATION] = { SD_PATH_USER_CONFIGURATION, NULL  },
         };
 
@@ -2044,6 +2045,9 @@ int manager_add_job(
         if (mode == JOB_TRIGGERING && type != JOB_STOP)
                 return sd_bus_error_set(error, SD_BUS_ERROR_INVALID_ARGS, "--job-mode=triggering is only valid for stop.");
 
+        if (mode == JOB_RESTART_DEPENDENCIES && type != JOB_START)
+                return sd_bus_error_set(error, SD_BUS_ERROR_INVALID_ARGS, "--job-mode=restart-dependencies is only valid for start.");
+
         log_unit_debug(unit, "Trying to enqueue job %s/%s/%s", unit->id, job_type_to_string(type), job_mode_to_string(mode));
 
         type = job_type_collapse(type, unit);
@@ -2059,7 +2063,8 @@ int manager_add_job(
                         /* by= */ NULL,
                         TRANSACTION_MATTERS |
                         (IN_SET(mode, JOB_IGNORE_DEPENDENCIES, JOB_IGNORE_REQUIREMENTS) ? TRANSACTION_IGNORE_REQUIREMENTS : 0) |
-                        (mode == JOB_IGNORE_DEPENDENCIES ? TRANSACTION_IGNORE_ORDER : 0),
+                        (mode == JOB_IGNORE_DEPENDENCIES ? TRANSACTION_IGNORE_ORDER : 0) |
+                        (mode == JOB_RESTART_DEPENDENCIES ? TRANSACTION_PROPAGATE_START_AS_RESTART : 0),
                         error);
         if (r < 0)
                 return r;
@@ -3272,7 +3277,7 @@ int manager_load_unit_from_dbus_path(Manager *m, const char *s, sd_bus_error *e,
         if (r < 0)
                 return r;
 
-        /* Permit addressing units by invocation ID: if the passed bus path is suffixed by a 128bit ID then
+        /* Permit addressing units by invocation ID: if the passed bus path is suffixed by a 128-bit ID then
          * we use it as invocation ID. */
         r = sd_id128_from_string(n, &invocation_id);
         if (r >= 0) {
@@ -3350,23 +3355,20 @@ void manager_send_unit_audit(Manager *m, Unit *u, int type, bool success) {
         if (MANAGER_IS_RELOADING(m))
                 return;
 
-        if (u->type != UNIT_SERVICE)
-                return;
-
         r = unit_name_to_prefix_and_instance(u->id, &p);
         if (r < 0) {
-                log_error_errno(r, "Failed to extract prefix and instance of unit name: %m");
+                log_warning_errno(r, "Failed to extract prefix and instance of unit name, ignoring: %m");
                 return;
         }
 
         msg = strjoina("unit=", p);
         if (audit_log_user_comm_message(audit_fd, type, msg, "systemd", NULL, NULL, NULL, success) < 0) {
-                if (errno == EPERM)
-                        /* We aren't allowed to send audit messages?
-                         * Then let's not retry again. */
+                if (ERRNO_IS_PRIVILEGE(errno)) {
+                        /* We aren't allowed to send audit messages?  Then let's not retry again. */
+                        log_debug_errno(errno, "Failed to send audit message, closing audit socket: %m");
                         close_audit_fd();
-                else
-                        log_warning_errno(errno, "Failed to send audit message: %m");
+                } else
+                        log_warning_errno(errno, "Failed to send audit message, ignoring: %m");
         }
 #endif
 
@@ -3389,7 +3391,7 @@ void manager_send_unit_plymouth(Manager *m, Unit *u) {
         if (detect_container() > 0)
                 return;
 
-        if (!IN_SET(u->type, UNIT_SERVICE, UNIT_MOUNT, UNIT_SWAP))
+        if (!UNIT_VTABLE(u)->notify_plymouth)
                 return;
 
         /* We set SOCK_NONBLOCK here so that we rather drop the
@@ -3886,6 +3888,7 @@ static int manager_run_environment_generators(Manager *m) {
 static int build_generator_environment(Manager *m, char ***ret) {
         _cleanup_strv_free_ char **nl = NULL;
         Virtualization v;
+        ConfidentialVirtualization cv;
         int r;
 
         assert(m);
@@ -3930,6 +3933,15 @@ static int build_generator_environment(Manager *m, char ***ret) {
                              virtualization_to_string(v));
 
                 r = strv_env_assign(&nl, "SYSTEMD_VIRTUALIZATION", s);
+                if (r < 0)
+                        return r;
+        }
+
+        cv = detect_confidential_virtualization();
+        if (cv < 0)
+                log_debug_errno(cv, "Failed to detect confidential virtualization, ignoring: %m");
+        else if (cv > 0) {
+                r = strv_env_assign(&nl, "SYSTEMD_CONFIDENTIAL_VIRTUALIZATION", confidential_virtualization_to_string(cv));
                 if (r < 0)
                         return r;
         }
@@ -4500,7 +4512,7 @@ static void manager_unref_uid_internal(
         /* A generic implementation, covering both manager_unref_uid() and manager_unref_gid(), under the
          * assumption that uid_t and gid_t are actually defined the same way, with the same validity rules.
          *
-         * We store a hashmap where the key is the UID/GID and the value is a 32bit reference counter, whose
+         * We store a hashmap where the key is the UID/GID and the value is a 32-bit reference counter, whose
          * highest bit is used as flag for marking UIDs/GIDs whose IPC objects to remove when the last
          * reference to the UID/GID is dropped. The flag is set to on, once at least one reference from a
          * unit where RemoveIPC= is set is added on a UID/GID. It is reset when the UID's/GID's reference

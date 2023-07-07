@@ -21,6 +21,7 @@
 #include "fs-util.h"
 #include "glob-util.h"
 #include "journal-upload.h"
+#include "journal-util.h"
 #include "log.h"
 #include "main-func.h"
 #include "mkdir.h"
@@ -50,7 +51,9 @@ static char **arg_file = NULL;
 static const char *arg_cursor = NULL;
 static bool arg_after_cursor = false;
 static int arg_journal_type = 0;
+static int arg_namespace_flags = 0;
 static const char *arg_machine = NULL;
+static const char *arg_namespace = NULL;
 static bool arg_merge = false;
 static int arg_follow = -1;
 static const char *arg_save_state = NULL;
@@ -557,6 +560,7 @@ static int help(void) {
                "     --user                 Use the user journal for the current user\n"
                "  -m --merge                Use  all available journals\n"
                "  -M --machine=CONTAINER    Operate on local container\n"
+               "     --namespace=NAMESPACE  Use journal files from namespace\n"
                "  -D --directory=PATH       Use journal files from directory\n"
                "     --file=PATH            Use this journal file\n"
                "     --cursor=CURSOR        Start at the specified cursor\n"
@@ -584,6 +588,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_AFTER_CURSOR,
                 ARG_FOLLOW,
                 ARG_SAVE_STATE,
+                ARG_NAMESPACE,
         };
 
         static const struct option options[] = {
@@ -597,6 +602,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "user",         no_argument,       NULL, ARG_USER           },
                 { "merge",        no_argument,       NULL, 'm'                },
                 { "machine",      required_argument, NULL, 'M'                },
+                { "namespace",    required_argument, NULL, ARG_NAMESPACE      },
                 { "directory",    required_argument, NULL, 'D'                },
                 { "file",         required_argument, NULL, ARG_FILE           },
                 { "cursor",       required_argument, NULL, ARG_CURSOR         },
@@ -673,6 +679,23 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_machine = optarg;
                         break;
 
+                case ARG_NAMESPACE:
+                        if (streq(optarg, "*")) {
+                                arg_namespace_flags = SD_JOURNAL_ALL_NAMESPACES;
+                                arg_namespace = NULL;
+                        } else if (startswith(optarg, "+")) {
+                                arg_namespace_flags = SD_JOURNAL_INCLUDE_DEFAULT_NAMESPACE;
+                                arg_namespace = optarg + 1;
+                        } else if (isempty(optarg)) {
+                                arg_namespace_flags = 0;
+                                arg_namespace = NULL;
+                        } else {
+                                arg_namespace_flags = 0;
+                                arg_namespace = optarg;
+                        }
+
+                        break;
+
                 case 'D':
                         if (arg_directory)
                                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
@@ -747,18 +770,17 @@ static int parse_argv(int argc, char *argv[]) {
 static int open_journal(sd_journal **j) {
         int r;
 
+        assert(j);
+
         if (arg_directory)
                 r = sd_journal_open_directory(j, arg_directory, arg_journal_type);
         else if (arg_file)
                 r = sd_journal_open_files(j, (const char**) arg_file, 0);
-        else if (arg_machine) {
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-                /* FIXME: replace with D-Bus call OpenMachineRootDirectory() so that things also work with raw disk images */
-                r = sd_journal_open_container(j, arg_machine, 0);
-#pragma GCC diagnostic pop
-        } else
-                r = sd_journal_open(j, (arg_merge ? 0 : SD_JOURNAL_LOCAL_ONLY) | arg_journal_type);
+        else if (arg_machine)
+                r = journal_open_machine(j, arg_machine);
+        else
+                r = sd_journal_open_namespace(j, arg_namespace,
+                                              (arg_merge ? 0 : SD_JOURNAL_LOCAL_ONLY) | arg_namespace_flags | arg_journal_type);
         if (r < 0)
                 log_error_errno(r, "Failed to open %s: %m",
                                 arg_directory ?: (arg_file ? "files" : "journal"));

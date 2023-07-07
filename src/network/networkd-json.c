@@ -7,6 +7,7 @@
 #include "ip-protocol-list.h"
 #include "netif-util.h"
 #include "networkd-address.h"
+#include "networkd-dhcp-common.h"
 #include "networkd-json.h"
 #include "networkd-link.h"
 #include "networkd-manager.h"
@@ -51,8 +52,10 @@ static int address_build_json(Address *address, JsonVariant **ret) {
                                 JSON_BUILD_PAIR_UNSIGNED("Flags", address->flags),
                                 JSON_BUILD_PAIR_STRING("FlagsString", flags),
                                 JSON_BUILD_PAIR_STRING_NON_EMPTY("Label", address->label),
-                                JSON_BUILD_PAIR_FINITE_USEC("PreferredLifetimeUsec", address->lifetime_preferred_usec),
-                                JSON_BUILD_PAIR_FINITE_USEC("ValidLifetimeUsec", address->lifetime_valid_usec),
+                                JSON_BUILD_PAIR_FINITE_USEC("PreferredLifetimeUSec", address->lifetime_preferred_usec),
+                                JSON_BUILD_PAIR_FINITE_USEC("PreferredLifetimeUsec", address->lifetime_preferred_usec), /* for backward compat */
+                                JSON_BUILD_PAIR_FINITE_USEC("ValidLifetimeUSec", address->lifetime_valid_usec),
+                                JSON_BUILD_PAIR_FINITE_USEC("ValidLifetimeUsec", address->lifetime_valid_usec), /* for backward compat */
                                 JSON_BUILD_PAIR_STRING("ConfigSource", network_config_source_to_string(address->source)),
                                 JSON_BUILD_PAIR_STRING("ConfigState", state),
                                 JSON_BUILD_PAIR_IN_ADDR_NON_NULL("ConfigProvider", &address->provider, address->family)));
@@ -873,6 +876,25 @@ finalize:
         return r;
 }
 
+static int captive_portal_build_json(Link *link, JsonVariant **ret) {
+        const char *captive_portal;
+        int r;
+
+        assert(link);
+        assert(ret);
+
+        r = link_get_captive_portal(link, &captive_portal);
+        if (r < 0)
+                return r;
+
+        if (!captive_portal) {
+                *ret = NULL;
+                return 0;
+        }
+
+        return json_build(ret, JSON_BUILD_OBJECT(JSON_BUILD_PAIR_STRING("CaptivePortal", captive_portal)));
+}
+
 static int domain_build_json(int family, const char *domain, NetworkConfigSource s, const union in_addr_union *p, JsonVariant **ret) {
         assert(IN_SET(family, AF_UNSPEC, AF_INET, AF_INET6));
         assert(domain);
@@ -1381,6 +1403,16 @@ int link_build_json(Link *link, JsonVariant **ret) {
         w = json_variant_unref(w);
 
         r = sip_build_json(link, &w);
+        if (r < 0)
+                return r;
+
+        r = json_variant_merge(&v, w);
+        if (r < 0)
+                return r;
+
+        w = json_variant_unref(w);
+
+        r = captive_portal_build_json(link, &w);
         if (r < 0)
                 return r;
 

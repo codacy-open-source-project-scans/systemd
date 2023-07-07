@@ -28,6 +28,7 @@
 #include "load-fragment.h"
 #include "log.h"
 #include "manager.h"
+#include "missing_audit.h"
 #include "open-file.h"
 #include "parse-util.h"
 #include "path-util.h"
@@ -71,6 +72,7 @@ static const UnitActiveState state_translation_table[_SERVICE_STATE_MAX] = {
         [SERVICE_FAILED_BEFORE_AUTO_RESTART] = UNIT_FAILED,
         [SERVICE_DEAD_RESOURCES_PINNED] = UNIT_INACTIVE,
         [SERVICE_AUTO_RESTART] = UNIT_ACTIVATING,
+        [SERVICE_AUTO_RESTART_QUEUED] = UNIT_ACTIVATING,
         [SERVICE_CLEANING] = UNIT_MAINTENANCE,
 };
 
@@ -100,6 +102,7 @@ static const UnitActiveState state_translation_table_idle[_SERVICE_STATE_MAX] = 
         [SERVICE_FAILED_BEFORE_AUTO_RESTART] = UNIT_FAILED,
         [SERVICE_DEAD_RESOURCES_PINNED] = UNIT_INACTIVE,
         [SERVICE_AUTO_RESTART] = UNIT_ACTIVATING,
+        [SERVICE_AUTO_RESTART_QUEUED] = UNIT_ACTIVATING,
         [SERVICE_CLEANING] = UNIT_MAINTENANCE,
 };
 
@@ -284,15 +287,14 @@ usec_t service_restart_usec_next(Service *s) {
 
         assert(s);
 
-        /* When the service state is in SERVICE_*_BEFORE_AUTO_RESTART or SERVICE_AUTO_RESTART,
-         * we still need to add 1 to s->n_restarts manually because s->n_restarts is not updated
-         * until a restart job is enqueued. Note that for SERVICE_AUTO_RESTART, that might have been
-         * the case, i.e. s->n_restarts is already increased. But we assume it's not since the time
-         * between job enqueuing and running is usually neglectable compared to the time we'll be sleeping. */
-        n_restarts_next = s->n_restarts + 1;
+        /* When the service state is in SERVICE_*_BEFORE_AUTO_RESTART or SERVICE_AUTO_RESTART, we still need
+         * to add 1 to s->n_restarts manually, because s->n_restarts is not updated until a restart job is
+         * enqueued, i.e. state has transitioned to SERVICE_AUTO_RESTART_QUEUED. */
+        n_restarts_next = s->n_restarts + (s->state == SERVICE_AUTO_RESTART_QUEUED ? 0 : 1);
 
         if (n_restarts_next <= 1 ||
             s->restart_steps == 0 ||
+            s->restart_usec == 0 ||
             s->restart_max_delay_usec == USEC_INFINITY ||
             s->restart_usec >= s->restart_max_delay_usec)
                 value = s->restart_usec;
@@ -302,10 +304,15 @@ usec_t service_restart_usec_next(Service *s) {
                 /* Enforced in service_verify() and above */
                 assert(s->restart_max_delay_usec > s->restart_usec);
 
-                /* ((restart_usec_max - restart_usec)^(1/restart_steps))^(n_restart_next - 1) */
-                value = usec_add(s->restart_usec,
-                                 (usec_t) powl(s->restart_max_delay_usec - s->restart_usec,
-                                               (long double) (n_restarts_next - 1) / s->restart_steps));
+                /* r_i / r_0 = (r_n / r_0) ^ (i / n)
+                 * where,
+                 *   r_0 : initial restart usec (s->restart_usec),
+                 *   r_i : i-th restart usec (value),
+                 *   r_n : maximum restart usec (s->restart_max_delay_usec),
+                 *   i : index of the next step (n_restarts_next - 1)
+                 *   n : num maximum steps (s->restart_steps) */
+                value = (usec_t) (s->restart_usec * powl((long double) s->restart_max_delay_usec / s->restart_usec,
+                                                         (long double) (n_restarts_next - 1) / s->restart_steps));
         }
 
         log_unit_debug(UNIT(s), "Next restart interval calculated as: %s", FORMAT_TIMESPAN(value, 0));
@@ -1257,7 +1264,7 @@ static void service_set_state(Service *s, ServiceState state) {
 
         if (IN_SET(state,
                    SERVICE_DEAD, SERVICE_FAILED,
-                   SERVICE_DEAD_BEFORE_AUTO_RESTART, SERVICE_FAILED_BEFORE_AUTO_RESTART, SERVICE_AUTO_RESTART,
+                   SERVICE_DEAD_BEFORE_AUTO_RESTART, SERVICE_FAILED_BEFORE_AUTO_RESTART, SERVICE_AUTO_RESTART, SERVICE_AUTO_RESTART_QUEUED,
                    SERVICE_DEAD_RESOURCES_PINNED)) {
                 unit_unwatch_all_pids(UNIT(s));
                 unit_dequeue_rewatch_pids(UNIT(s));
@@ -1362,7 +1369,7 @@ static int service_coldplug(Unit *u) {
 
         if (!IN_SET(s->deserialized_state,
                     SERVICE_DEAD, SERVICE_FAILED,
-                    SERVICE_DEAD_BEFORE_AUTO_RESTART, SERVICE_FAILED_BEFORE_AUTO_RESTART, SERVICE_AUTO_RESTART,
+                    SERVICE_DEAD_BEFORE_AUTO_RESTART, SERVICE_FAILED_BEFORE_AUTO_RESTART, SERVICE_AUTO_RESTART, SERVICE_AUTO_RESTART_QUEUED,
                     SERVICE_CLEANING,
                     SERVICE_DEAD_RESOURCES_PINNED)) {
                 (void) unit_enqueue_rewatch_pids(u);
@@ -1944,7 +1951,7 @@ static bool service_will_restart(Unit *u) {
 
         assert(s);
 
-        if (IN_SET(s->state, SERVICE_DEAD_BEFORE_AUTO_RESTART, SERVICE_FAILED_BEFORE_AUTO_RESTART, SERVICE_AUTO_RESTART))
+        if (IN_SET(s->state, SERVICE_DEAD_BEFORE_AUTO_RESTART, SERVICE_FAILED_BEFORE_AUTO_RESTART, SERVICE_AUTO_RESTART, SERVICE_AUTO_RESTART_QUEUED))
                 return true;
 
         return unit_will_restart_default(u);
@@ -2004,7 +2011,8 @@ static void service_enter_dead(Service *s, ServiceResult f, bool allow_restart) 
                  * are only transitionary and followed by an automatic restart. We have fine-grained
                  * low-level states for this though so that software can distinguish the permanent UNIT_INACTIVE
                  * state from this transitionary UNIT_INACTIVE state by looking at the low-level states. */
-                service_set_state(s, restart_state);
+                if (s->restart_mode != SERVICE_RESTART_MODE_DIRECT)
+                        service_set_state(s, restart_state);
 
                 r = service_arm_timer(s, /* relative= */ true, service_restart_usec_next(s));
                 if (r < 0)
@@ -2510,17 +2518,15 @@ static void service_enter_restart(Service *s) {
                 return;
         }
 
-        /* Any units that are bound to this service must also be
-         * restarted. We use JOB_RESTART (instead of the more obvious
-         * JOB_START) here so that those dependency jobs will be added
-         * as well. */
-        r = manager_add_job(UNIT(s)->manager, JOB_RESTART, UNIT(s), JOB_REPLACE, NULL, &error, NULL);
+        /* Any units that are bound to this service must also be restarted. We use JOB_START for ourselves
+         * but then set JOB_RESTART_DEPENDENCIES which will enqueue JOB_RESTART for those dependency jobs. */
+        r = manager_add_job(UNIT(s)->manager, JOB_START, UNIT(s), JOB_RESTART_DEPENDENCIES, NULL, &error, NULL);
         if (r < 0)
                 goto fail;
 
-        /* Count the jobs we enqueue for restarting. This counter is maintained as long as the unit isn't fully
-         * stopped, i.e. as long as it remains up or remains in auto-start states. The user can reset the counter
-         * explicitly however via the usual "systemctl reset-failure" logic. */
+        /* Count the jobs we enqueue for restarting. This counter is maintained as long as the unit isn't
+         * fully stopped, i.e. as long as it remains up or remains in auto-start states. The user can reset
+         * the counter explicitly however via the usual "systemctl reset-failure" logic. */
         s->n_restarts ++;
         s->flush_n_restarts = false;
 
@@ -2533,13 +2539,10 @@ static void service_enter_restart(Service *s) {
                                          "Scheduled restart job, restart counter is at %u.", s->n_restarts),
                         "N_RESTARTS=%u", s->n_restarts);
 
+        service_set_state(s, SERVICE_AUTO_RESTART_QUEUED);
+
         /* Notify clients about changed restart counter */
         unit_add_to_dbus_queue(UNIT(s));
-
-        /* Note that we stay in the SERVICE_AUTO_RESTART state here,
-         * it will be canceled as part of the service_stop() call that
-         * is executed as part of JOB_RESTART. */
-
         return;
 
 fail:
@@ -2718,7 +2721,7 @@ static int service_start(Unit *u) {
         if (IN_SET(s->state, SERVICE_AUTO_RESTART, SERVICE_DEAD_BEFORE_AUTO_RESTART, SERVICE_FAILED_BEFORE_AUTO_RESTART))
                 return -EAGAIN;
 
-        assert(IN_SET(s->state, SERVICE_DEAD, SERVICE_FAILED, SERVICE_DEAD_RESOURCES_PINNED));
+        assert(IN_SET(s->state, SERVICE_DEAD, SERVICE_FAILED, SERVICE_DEAD_RESOURCES_PINNED, SERVICE_AUTO_RESTART_QUEUED));
 
         r = unit_acquire_invocation_id(u);
         if (r < 0)
@@ -2776,7 +2779,8 @@ static int service_stop(Unit *u) {
                 return 0;
 
         case SERVICE_AUTO_RESTART:
-                /* A restart will be scheduled or is in progress. */
+        case SERVICE_AUTO_RESTART_QUEUED:
+                /* Give up on the auto restart */
                 service_set_state(s, service_determine_dead_state(s));
                 return 0;
 
@@ -3649,6 +3653,7 @@ static void service_notify_cgroup_empty_event(Unit *u) {
         /* If the cgroup empty notification comes when the unit is not active, we must have failed to clean
          * up the cgroup earlier and should do it now. */
         case SERVICE_AUTO_RESTART:
+        case SERVICE_AUTO_RESTART_QUEUED:
                 unit_prune_cgroup(u);
                 break;
 
@@ -5005,6 +5010,13 @@ static const char* const service_restart_table[_SERVICE_RESTART_MAX] = {
 
 DEFINE_STRING_TABLE_LOOKUP(service_restart, ServiceRestart);
 
+static const char* const service_restart_mode_table[_SERVICE_RESTART_MODE_MAX] = {
+        [SERVICE_RESTART_MODE_NORMAL] = "normal",
+        [SERVICE_RESTART_MODE_DIRECT]  = "direct",
+};
+
+DEFINE_STRING_TABLE_LOOKUP(service_restart_mode, ServiceRestartMode);
+
 static const char* const service_type_table[_SERVICE_TYPE_MAX] = {
         [SERVICE_SIMPLE]        = "simple",
         [SERVICE_FORKING]       = "forking",
@@ -5166,4 +5178,9 @@ const UnitVTable service_vtable = {
         },
 
         .can_start = service_can_start,
+
+        .notify_plymouth = true,
+
+        .audit_start_message_type = AUDIT_SERVICE_START,
+        .audit_stop_message_type = AUDIT_SERVICE_STOP,
 };

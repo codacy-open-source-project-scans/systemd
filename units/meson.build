@@ -56,6 +56,11 @@ units = [
           'conditions' : ['ENABLE_HIBERNATE'],
         },
         {
+          'file' : 'systemd-battery-check.service.in',
+          'conditions' : ['ENABLE_INITRD'],
+          'symlinks' : ['initrd.target.wants/'],
+        },
+        {
           'file' : 'initrd-cleanup.service',
           'conditions' : ['ENABLE_INITRD'],
         },

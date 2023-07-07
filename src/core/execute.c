@@ -2466,6 +2466,7 @@ static int create_many_symlinks(const char *root, const char *source, char **sym
 }
 
 static int setup_exec_directory(
+                Unit *u,
                 const ExecContext *context,
                 const ExecParameters *params,
                 uid_t uid,
@@ -2510,6 +2511,61 @@ static int setup_exec_directory(
                 r = mkdir_parents_label(p, 0755);
                 if (r < 0)
                         goto fail;
+
+                if (IN_SET(type, EXEC_DIRECTORY_STATE, EXEC_DIRECTORY_LOGS) && params->runtime_scope == RUNTIME_SCOPE_USER) {
+
+                        /* If we are in user mode, and a configuration directory exists but a state directory
+                         * doesn't exist, then we likely are upgrading from an older systemd version that
+                         * didn't know the more recent addition to the xdg-basedir spec: the $XDG_STATE_HOME
+                         * directory. In older systemd versions EXEC_DIRECTORY_STATE was aliased to
+                         * EXEC_DIRECTORY_CONFIGURATION, with the advent of $XDG_STATE_HOME is is now
+                         * seperated. If a service has both dirs configured but only the configuration dir
+                         * exists and the state dir does not, we assume we are looking at an update
+                         * situation. Hence, create a compatibility symlink, so that all expectations are
+                         * met.
+                         *
+                         * (We also do something similar with the log directory, which still doesn't exist in
+                         * the xdg basedir spec. We'll make it a subdir of the state dir.) */
+
+                        /* this assumes the state dir is always created before the configuration dir */
+                        assert_cc(EXEC_DIRECTORY_STATE < EXEC_DIRECTORY_LOGS);
+                        assert_cc(EXEC_DIRECTORY_LOGS < EXEC_DIRECTORY_CONFIGURATION);
+
+                        r = laccess(p, F_OK);
+                        if (r == -ENOENT) {
+                                _cleanup_free_ char *q = NULL;
+
+                                /* OK, we know that the state dir does not exist. Let's see if the dir exists
+                                 * under the configuration hierarchy. */
+
+                                if (type == EXEC_DIRECTORY_STATE)
+                                        q = path_join(params->prefix[EXEC_DIRECTORY_CONFIGURATION], context->directories[type].items[i].path);
+                                else if (type == EXEC_DIRECTORY_LOGS)
+                                        q = path_join(params->prefix[EXEC_DIRECTORY_CONFIGURATION], "log", context->directories[type].items[i].path);
+                                else
+                                        assert_not_reached();
+                                if (!q) {
+                                        r = -ENOMEM;
+                                        goto fail;
+                                }
+
+                                r = laccess(q, F_OK);
+                                if (r >= 0) {
+                                        /* It does exist! This hence looks like an update. Symlink the
+                                         * configuration directory into the state directory. */
+
+                                        r = symlink_idempotent(q, p, /* make_relative= */ true);
+                                        if (r < 0)
+                                                goto fail;
+
+                                        log_unit_notice(u, "Unit state directory %s missing but matching configuration directory %s exists, assuming update from systemd 253 or older, creating compatibility symlink.", p, q);
+                                        continue;
+                                } else if (r != -ENOENT)
+                                        log_unit_warning_errno(u, r, "Unable to detect whether unit configuration directory '%s' exists, assuming not: %m", q);
+
+                        } else if (r < 0)
+                                log_unit_warning_errno(u, r, "Unable to detect whether unit state directory '%s' is missing, assuming it is: %m", p);
+                }
 
                 if (exec_directory_is_private(context, type)) {
                         /* So, here's one extra complication when dealing with DynamicUser=1 units. In that
@@ -2559,20 +2615,19 @@ static int setup_exec_directory(
                                 goto fail;
 
                         if (is_dir(p, false) > 0 &&
-                            (laccess(pp, F_OK) < 0 && errno == ENOENT)) {
+                            (laccess(pp, F_OK) == -ENOENT)) {
 
                                 /* Hmm, the private directory doesn't exist yet, but the normal one exists? If so, move
                                  * it over. Most likely the service has been upgraded from one that didn't use
                                  * DynamicUser=1, to one that does. */
 
-                                log_info("Found pre-existing public %s= directory %s, migrating to %s.\n"
-                                         "Apparently, service previously had DynamicUser= turned off, and has now turned it on.",
-                                         exec_directory_type_to_string(type), p, pp);
+                                log_unit_info(u, "Found pre-existing public %s= directory %s, migrating to %s.\n"
+                                              "Apparently, service previously had DynamicUser= turned off, and has now turned it on.",
+                                              exec_directory_type_to_string(type), p, pp);
 
-                                if (rename(p, pp) < 0) {
-                                        r = -errno;
+                                r = RET_NERRNO(rename(p, pp));
+                                if (r < 0)
                                         goto fail;
-                                }
                         } else {
                                 /* Otherwise, create the actual directory for the service */
 
@@ -2634,19 +2689,17 @@ static int setup_exec_directory(
                                         /* Hmm, apparently DynamicUser= was once turned on for this service,
                                          * but is no longer. Let's move the directory back up. */
 
-                                        log_info("Found pre-existing private %s= directory %s, migrating to %s.\n"
-                                                 "Apparently, service previously had DynamicUser= turned on, and has now turned it off.",
-                                                 exec_directory_type_to_string(type), q, p);
+                                        log_unit_info(u, "Found pre-existing private %s= directory %s, migrating to %s.\n"
+                                                      "Apparently, service previously had DynamicUser= turned on, and has now turned it off.",
+                                                      exec_directory_type_to_string(type), q, p);
 
-                                        if (unlink(p) < 0) {
-                                                r = -errno;
+                                        r = RET_NERRNO(unlink(p));
+                                        if (r < 0)
                                                 goto fail;
-                                        }
 
-                                        if (rename(q, p) < 0) {
-                                                r = -errno;
+                                        r = RET_NERRNO(rename(q, p));
+                                        if (r < 0)
                                                 goto fail;
-                                        }
                                 }
                         }
 
@@ -2662,17 +2715,16 @@ static int setup_exec_directory(
                                          * as in the common case it is not written to by a service, and shall
                                          * not be writable. */
 
-                                        if (stat(p, &st) < 0) {
-                                                r = -errno;
+                                        r = RET_NERRNO(stat(p, &st));
+                                        if (r < 0)
                                                 goto fail;
-                                        }
 
                                         /* Still complain if the access mode doesn't match */
                                         if (((st.st_mode ^ context->directories[type].mode) & 07777) != 0)
-                                                log_warning("%s \'%s\' already exists but the mode is different. "
-                                                            "(File system: %o %sMode: %o)",
-                                                            exec_directory_type_to_string(type), context->directories[type].items[i].path,
-                                                            st.st_mode & 07777, exec_directory_type_to_string(type), context->directories[type].mode & 07777);
+                                                log_unit_warning(u, "%s \'%s\' already exists but the mode is different. "
+                                                                 "(File system: %o %sMode: %o)",
+                                                                 exec_directory_type_to_string(type), context->directories[type].items[i].path,
+                                                                 st.st_mode & 07777, exec_directory_type_to_string(type), context->directories[type].mode & 07777);
 
                                         continue;
                                 }
@@ -2686,10 +2738,15 @@ static int setup_exec_directory(
                 if (r < 0)
                         goto fail;
 
+                /* Skip the rest (which deals with ownership) in user mode, since ownership changes are not
+                 * available to user code anyway */
+                if (params->runtime_scope != RUNTIME_SCOPE_SYSTEM)
+                        continue;
+
                 /* Then, change the ownership of the whole tree, if necessary. When dynamic users are used we
                  * drop the suid/sgid bits, since we really don't want SUID/SGID files for dynamic UID/GID
                  * assignments to exist. */
-                r = path_chown_recursive(pp ?: p, uid, gid, context->dynamic_user ? 01777 : 07777);
+                r = path_chown_recursive(pp ?: p, uid, gid, context->dynamic_user ? 01777 : 07777, AT_SYMLINK_FOLLOW);
                 if (r < 0)
                         goto fail;
         }
@@ -3125,6 +3182,10 @@ static int acquire_credentials(
         if (dfd < 0)
                 return -errno;
 
+        r = fd_acl_make_writable(dfd); /* Add the "w" bit, if we are reusing an already set up credentials dir where it was unset */
+        if (r < 0)
+                return r;
+
         /* First, load credentials off disk (or acquire via AF_UNIX socket) */
         HASHMAP_FOREACH(lc, context->load_credentials) {
                 _cleanup_close_ int sub_fd = -EBADF;
@@ -3256,8 +3317,9 @@ static int acquire_credentials(
                 left -= add;
         }
 
-        if (fchmod(dfd, 0500) < 0) /* Now take away the "w" bit */
-                return -errno;
+        r = fd_acl_make_read_only(dfd); /* Now take away the "w" bit */
+        if (r < 0)
+                return r;
 
         /* After we created all keys with the right perms, also make sure the credential store as a whole is
          * accessible */
@@ -3327,7 +3389,7 @@ static int setup_credentials_internal(
                         if (r < 0)
                                 return r;
 
-                        r = mount_nofollow_verbose(LOG_DEBUG, NULL, workspace, NULL, MS_BIND|MS_REMOUNT|MS_NODEV|MS_NOEXEC|MS_NOSUID, NULL);
+                        r = mount_nofollow_verbose(LOG_DEBUG, NULL, workspace, NULL, MS_BIND|MS_REMOUNT|credentials_fs_mount_flags(/* ro= */ false), NULL);
                         if (r < 0)
                                 return r;
 
@@ -3338,57 +3400,34 @@ static int setup_credentials_internal(
 
         if (workspace_mounted < 0) {
                 /* Nothing is mounted on the workspace yet, let's try to mount something now */
-                for (int try = 0;; try++) {
 
-                        if (try == 0) {
-                                /* Try "ramfs" first, since it's not swap backed */
-                                r = mount_nofollow_verbose(LOG_DEBUG, "ramfs", workspace, "ramfs", MS_NODEV|MS_NOEXEC|MS_NOSUID, "mode=0700");
-                                if (r >= 0) {
-                                        workspace_mounted = true;
-                                        break;
-                                }
+                r = mount_credentials_fs(workspace, CREDENTIALS_TOTAL_SIZE_MAX, /* ro= */ false);
+                if (r < 0) {
+                        /* If that didn't work, try to make a bind mount from the final to the workspace, so that we can make it writable there. */
+                        r = mount_nofollow_verbose(LOG_DEBUG, final, workspace, NULL, MS_BIND|MS_REC, NULL);
+                        if (r < 0) {
+                                if (!ERRNO_IS_PRIVILEGE(r)) /* Propagate anything that isn't a permission problem */
+                                        return r;
 
-                        } else if (try == 1) {
-                                _cleanup_free_ char *opts = NULL;
+                                if (must_mount) /* If we it's not OK to use the plain directory
+                                                 * fallback, propagate all errors too */
+                                        return r;
 
-                                if (asprintf(&opts, "mode=0700,nr_inodes=1024,size=%zu", (size_t) CREDENTIALS_TOTAL_SIZE_MAX) < 0)
-                                        return -ENOMEM;
+                                /* If we lack privileges to bind mount stuff, then let's gracefully
+                                 * proceed for compat with container envs, and just use the final dir
+                                 * as is. */
 
-                                /* Fall back to "tmpfs" otherwise */
-                                r = mount_nofollow_verbose(LOG_DEBUG, "tmpfs", workspace, "tmpfs", MS_NODEV|MS_NOEXEC|MS_NOSUID, opts);
-                                if (r >= 0) {
-                                        workspace_mounted = true;
-                                        break;
-                                }
-
+                                workspace_mounted = false;
                         } else {
-                                /* If that didn't work, try to make a bind mount from the final to the workspace, so that we can make it writable there. */
-                                r = mount_nofollow_verbose(LOG_DEBUG, final, workspace, NULL, MS_BIND|MS_REC, NULL);
-                                if (r < 0) {
-                                        if (!ERRNO_IS_PRIVILEGE(r)) /* Propagate anything that isn't a permission problem */
-                                                return r;
-
-                                        if (must_mount) /* If we it's not OK to use the plain directory
-                                                         * fallback, propagate all errors too */
-                                                return r;
-
-                                        /* If we lack privileges to bind mount stuff, then let's gracefully
-                                         * proceed for compat with container envs, and just use the final dir
-                                         * as is. */
-
-                                        workspace_mounted = false;
-                                        break;
-                                }
-
                                 /* Make the new bind mount writable (i.e. drop MS_RDONLY) */
-                                r = mount_nofollow_verbose(LOG_DEBUG, NULL, workspace, NULL, MS_BIND|MS_REMOUNT|MS_NODEV|MS_NOEXEC|MS_NOSUID, NULL);
+                                r = mount_nofollow_verbose(LOG_DEBUG, NULL, workspace, NULL, MS_BIND|MS_REMOUNT|credentials_fs_mount_flags(/* ro= */ false), NULL);
                                 if (r < 0)
                                         return r;
 
                                 workspace_mounted = true;
-                                break;
                         }
-                }
+                } else
+                        workspace_mounted = true;
         }
 
         assert(!must_mount || workspace_mounted > 0);
@@ -3420,7 +3459,7 @@ static int setup_credentials_internal(
 
                 if (install) {
                         /* Make workspace read-only now, so that any bind mount we make from it defaults to read-only too */
-                        r = mount_nofollow_verbose(LOG_DEBUG, NULL, workspace, NULL, MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NODEV|MS_NOEXEC|MS_NOSUID, NULL);
+                        r = mount_nofollow_verbose(LOG_DEBUG, NULL, workspace, NULL, MS_BIND|MS_REMOUNT|credentials_fs_mount_flags(/* ro= */ true), NULL);
                         if (r < 0)
                                 return r;
 
@@ -4066,7 +4105,7 @@ static int apply_mount_namespace(
                         return -ENOMEM;
         }
 
-        if (MANAGER_IS_SYSTEM(u->manager)) {
+        if (params->runtime_scope == RUNTIME_SCOPE_SYSTEM) {
                 propagate_dir = path_join("/run/systemd/propagate/", u->id);
                 if (!propagate_dir)
                         return -ENOMEM;
@@ -4078,9 +4117,12 @@ static int apply_mount_namespace(
                 extension_dir = strdup("/run/systemd/unit-extensions");
                 if (!extension_dir)
                         return -ENOMEM;
-        } else
+        } else {
+                assert(params->runtime_scope == RUNTIME_SCOPE_USER);
+
                 if (asprintf(&extension_dir, "/run/user/" UID_FMT "/systemd/unit-extensions", geteuid()) < 0)
                         return -ENOMEM;
+        }
 
         if (root_image) {
                 r = verity_settings_prepare(
@@ -4707,14 +4749,17 @@ static void log_command_line(Unit *unit, const char *msg, const char *executable
                         LOG_UNIT_INVOCATION_ID(unit));
 }
 
-static bool exec_context_need_unprivileged_private_users(const ExecContext *context, const Manager *manager) {
+static bool exec_context_need_unprivileged_private_users(
+                const ExecContext *context,
+                const ExecParameters *params) {
+
         assert(context);
-        assert(manager);
+        assert(params);
 
         /* These options require PrivateUsers= when used in user units, as we need to be in a user namespace
          * to have permission to enable them when not running as root. If we have effective CAP_SYS_ADMIN
          * (system manager) then we have privileges and don't need this. */
-        if (MANAGER_IS_SYSTEM(manager))
+        if (params->runtime_scope != RUNTIME_SCOPE_USER)
                 return false;
 
         return context->private_users ||
@@ -4924,7 +4969,7 @@ static int exec_child(
          * invocations themselves. Also note that while we'll only invoke NSS modules involved in user management they
          * might internally call into other NSS modules that are involved in hostname resolution, we never know. */
         if (setenv("SYSTEMD_ACTIVATION_UNIT", unit->id, true) != 0 ||
-            setenv("SYSTEMD_ACTIVATION_SCOPE", runtime_scope_to_string(unit->manager->runtime_scope), true) != 0) {
+            setenv("SYSTEMD_ACTIVATION_SCOPE", runtime_scope_to_string(params->runtime_scope), true) != 0) {
                 *exit_status = EXIT_MEMORY;
                 return log_unit_error_errno(unit, errno, "Failed to update environment: %m");
         }
@@ -5236,7 +5281,7 @@ static int exec_child(
         needs_mount_namespace = exec_needs_mount_namespace(context, params, runtime);
 
         for (ExecDirectoryType dt = 0; dt < _EXEC_DIRECTORY_TYPE_MAX; dt++) {
-                r = setup_exec_directory(context, params, uid, gid, dt, needs_mount_namespace, exit_status);
+                r = setup_exec_directory(unit, context, params, uid, gid, dt, needs_mount_namespace, exit_status);
                 if (r < 0)
                         return log_unit_error_errno(unit, r, "Failed to set up special execution directory in %s: %m", params->prefix[dt]);
         }
@@ -5392,7 +5437,7 @@ static int exec_child(
                 }
         }
 
-        if (needs_sandboxing && exec_context_need_unprivileged_private_users(context, unit->manager)) {
+        if (needs_sandboxing && exec_context_need_unprivileged_private_users(context, params)) {
                 /* If we're unprivileged, set up the user namespace first to enable use of the other namespaces.
                  * Users with CAP_SYS_ADMIN can set up user namespaces last because they will be able to
                  * set up the all of the other namespaces (i.e. network, mount, UTS) without a user namespace. */
@@ -5869,12 +5914,24 @@ static int exec_child(
         }
 
         if (!FLAGS_SET(command->flags, EXEC_COMMAND_NO_ENV_EXPAND)) {
-                replaced_argv = replace_env_argv(command->argv, accum_env);
-                if (!replaced_argv) {
+                _cleanup_strv_free_ char **unset_variables = NULL, **bad_variables = NULL;
+
+                r = replace_env_argv(command->argv, accum_env, &replaced_argv, &unset_variables, &bad_variables);
+                if (r < 0) {
                         *exit_status = EXIT_MEMORY;
-                        return log_oom();
+                        return log_unit_error_errno(unit, r, "Failed to replace environment variables: %m");
                 }
                 final_argv = replaced_argv;
+
+                if (!strv_isempty(unset_variables)) {
+                        _cleanup_free_ char *ju = strv_join(unset_variables, ", ");
+                        log_unit_warning(unit, "Referenced but unset environment variable evaluates to an empty string: %s", strna(ju));
+                }
+
+                if (!strv_isempty(bad_variables)) {
+                        _cleanup_free_ char *jb = strv_join(bad_variables, ", ");
+                        log_unit_warning(unit, "Invalid environment variable name evaluates to an empty string: %s", strna(jb));;
+                }
         } else
                 final_argv = command->argv;
 

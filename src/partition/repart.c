@@ -850,7 +850,7 @@ static int context_sum_weights(Context *context, FreeArea *a, uint64_t *ret) {
         return 0;
 
 overflow_sum:
-        return log_error_errno(SYNTHETIC_ERRNO(EOVERFLOW), "Combined weight of partition exceeds unsigned 64bit range, refusing.");
+        return log_error_errno(SYNTHETIC_ERRNO(EOVERFLOW), "Combined weight of partition exceeds unsigned 64-bit range, refusing.");
 }
 
 static uint64_t scale_by_weight(uint64_t value, uint64_t weight, uint64_t weight_sum) {
@@ -1590,7 +1590,7 @@ static int config_parse_uuid(
 
         r = sd_id128_from_string(rvalue, &partition->new_uuid);
         if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to parse 128bit ID/UUID, ignoring: %s", rvalue);
+                log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to parse 128-bit ID/UUID, ignoring: %s", rvalue);
                 return 0;
         }
 
@@ -1922,6 +1922,8 @@ static int determine_current_padding(
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Partition has no end!");
 
         offset = fdisk_partition_get_end(p);
+        assert(offset < UINT64_MAX);
+        offset++; /* The end is one sector before the next partition or padding. */
         assert(offset < UINT64_MAX / secsz);
         offset *= secsz;
 
@@ -2108,7 +2110,7 @@ static int context_load_partition_table(Context *context) {
                         return log_error_errno(errno, "Failed to stat block device '%s': %m", context->node);
 
                 if (S_ISREG(st.st_mode) && st.st_size == 0) {
-                        /* User the fallback values if we have no better idea */
+                        /* Use the fallback values if we have no better idea */
                         context->sector_size = arg_sector_size ?: 512;
                         context->grain_size = 4096;
                         return /* from_scratch = */ true;
@@ -3163,7 +3165,7 @@ typedef struct DecryptedPartitionTarget {
 } DecryptedPartitionTarget;
 
 static DecryptedPartitionTarget* decrypted_partition_target_free(DecryptedPartitionTarget *t) {
-#ifdef HAVE_LIBCRYPTSETUP
+#if HAVE_LIBCRYPTSETUP
         int r;
 
         if (!t)
@@ -5957,7 +5959,7 @@ static int help(void) {
                "                          Enroll signed TPM2 PCR policy against PEM public key\n"
                "     --tpm2-public-key-pcrs=PCR1+PCR2+PCR3+…\n"
                "                          Enroll signed TPM2 PCR policy for specified TPM2 PCRs\n"
-               "     --seed=UUID          128bit seed UUID to derive all UUIDs from\n"
+               "     --seed=UUID          128-bit seed UUID to derive all UUIDs from\n"
                "     --size=BYTES         Grow loopback file to specified size\n"
                "     --json=pretty|short|off\n"
                "                          Generate JSON output\n"

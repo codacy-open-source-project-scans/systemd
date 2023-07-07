@@ -1143,13 +1143,13 @@ CapabilityBoundingSet=~CAP_B CAP_C</programlisting>
         <constant>ppc</constant>, <constant>ppc-le</constant>, <constant>ppc64</constant>,
         <constant>ppc64-le</constant>, <constant>s390</constant> or <constant>s390x</constant>. Which
         personality architectures are supported depends on the kernel's native architecture. Usually the
-        64bit versions of the various system architectures support their immediate 32bit personality
+        64-bit versions of the various system architectures support their immediate 32-bit personality
         architecture counterpart, but no others. For example, <constant>x86-64</constant> systems support the
         <constant>x86-64</constant> and <constant>x86</constant> personalities but no others. The personality
         feature is useful when running 32-bit services on a 64-bit host system. If not specified, the
         personality is left unmodified and thus reflects the personality of the host system's kernel. This
         option is not useful on architectures for which only one native word width was ever available, such
-        as <constant>m68k</constant> (32bit only) or <constant>alpha</constant> (64bit only).</para></listitem>
+        as <constant>m68k</constant> (32-bit only) or <constant>alpha</constant> (64-bit only).</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -1378,7 +1378,7 @@ CapabilityBoundingSet=~CAP_B CAP_C</programlisting>
               <row>
                 <entry><varname>StateDirectory=</varname></entry>
                 <entry><filename>/var/lib/</filename></entry>
-                <entry><varname>$XDG_CONFIG_HOME</varname></entry>
+                <entry><varname>$XDG_STATE_HOME</varname></entry>
                 <entry><varname>$STATE_DIRECTORY</varname></entry>
               </row>
               <row>
@@ -1390,7 +1390,7 @@ CapabilityBoundingSet=~CAP_B CAP_C</programlisting>
               <row>
                 <entry><varname>LogsDirectory=</varname></entry>
                 <entry><filename>/var/log/</filename></entry>
-                <entry><varname>$XDG_CONFIG_HOME</varname><filename>/log/</filename></entry>
+                <entry><varname>$XDG_STATE_HOME</varname><filename>/log/</filename></entry>
                 <entry><varname>$LOGS_DIRECTORY</varname></entry>
               </row>
               <row>
@@ -1447,7 +1447,7 @@ CapabilityBoundingSet=~CAP_B CAP_C</programlisting>
         The second parameter will be interpreted as a destination path that will be created as a symlink to the directory.
         The symlinks will be created after any <varname>BindPaths=</varname> or <varname>TemporaryFileSystem=</varname>
         options have been set up, to make ephemeral symlinking possible. The same source can have multiple symlinks, by
-        using the same first parameter, but a different second parameter.</para></listitem>
+        using the same first parameter, but a different second parameter.</para>
 
         <para>The directories defined by these options are always created under the standard paths used by systemd
         (<filename>/var/</filename>, <filename>/run/</filename>, <filename>/etc/</filename>, …). If the service needs
@@ -1483,7 +1483,7 @@ StateDirectory=aaa/bbb ccc</programlisting>
         <programlisting>RuntimeDirectory=foo:bar foo:baz</programlisting>
         the service manager creates <filename index='false'>/run/foo</filename> (if it does not exist), and
         <filename index='false'>/run/bar</filename> plus <filename index='false'>/run/baz</filename> as symlinks to
-        <filename index='false'>/run/foo</filename>.</para>
+        <filename index='false'>/run/foo</filename>.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -3274,18 +3274,21 @@ StandardInputData=V2XigLJyZSBubyBzdHJhbmdlcnMgdG8gbG92ZQpZb3Uga25vdyB0aGUgcnVsZX
         11) with a prefix of <literal>io.systemd.credential:</literal> or
         <literal>io.systemd.credential.binary:</literal>. In both cases a key/value pair separated by
         <literal>=</literal> is expected, in the latter case the right-hand side is Base64 decoded when
-        parsed (thus permitting binary data to be passed in). Example
-        <ulink url="https://www.qemu.org/docs/master/system/index.html">qemu</ulink>
-        switch: <literal>-smbios
+        parsed (thus permitting binary data to be passed in). Example <ulink
+        url="https://www.qemu.org/docs/master/system/index.html">qemu</ulink> switch: <literal>-smbios
         type=11,value=io.systemd.credential:xx=yy</literal>, or <literal>-smbios
         type=11,value=io.systemd.credential.binary:rick=TmV2ZXIgR29ubmEgR2l2ZSBZb3UgVXA=</literal>. Alternatively,
         use the <command>qemu</command> <literal>fw_cfg</literal> node
-        <literal>opt/io.systemd.credentials/</literal>. Example <command>qemu</command> switch: <literal>-fw_cfg
-        name=opt/io.systemd.credentials/mycred,string=supersecret</literal>. They may also be specified on
-        the kernel command line using the <literal>systemd.set_credential=</literal> switch (see
-        <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>) and from
-        the UEFI firmware environment via
-        <citerefentry><refentrytitle>systemd-stub</refentrytitle><manvolnum>7</manvolnum></citerefentry>.</para>
+        <literal>opt/io.systemd.credentials/</literal>. Example <command>qemu</command> switch:
+        <literal>-fw_cfg name=opt/io.systemd.credentials/mycred,string=supersecret</literal>. They may also
+        be passed from the UEFI firmware environment via
+        <citerefentry><refentrytitle>systemd-stub</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
+        from the initrd (see
+        <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>), or be
+        specified on the kernel command line using the <literal>systemd.set_credential=</literal> and
+        <literal>systemd.set_credential_binary=</literal> switches (see
+        <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry> – this is
+        not recommended since unprivileged userspace can read the kernel command line). </para>
 
         <para>If referencing an <constant>AF_UNIX</constant> stream socket to connect to, the connection will
         originate from an abstract namespace socket, that includes information about the unit and the
@@ -3505,7 +3508,7 @@ StandardInputData=V2XigLJyZSBubyBzdHJhbmdlcnMgdG8gbG92ZQpZb3Uga25vdyB0aGUgcnVsZX
         <varlistentry>
           <term><varname>$INVOCATION_ID</varname></term>
 
-          <listitem><para>Contains a randomized, unique 128bit ID identifying each runtime cycle of the unit, formatted
+          <listitem><para>Contains a randomized, unique 128-bit ID identifying each runtime cycle of the unit, formatted
           as 32 character hexadecimal string. A new ID is assigned each time the unit changes from an inactive state into
           an activating or active state, and may be used to identify this specific runtime cycle, in particular in data
           stored offline, such as the journal. The same ID is passed to all processes run as part of the

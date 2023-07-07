@@ -3,6 +3,9 @@
 set -eux
 set -o pipefail
 
+# shellcheck source=test/units/util.sh
+. "$(dirname "$0")"/util.sh
+
 # Simple test for that daemon-reexec works in container.
 # See: https://github.com/systemd/systemd/pull/23883
 systemctl daemon-reexec
@@ -126,5 +129,41 @@ systemctl daemon-reload
 for i in {0..19}; do
     systemctl start "transaction-cycle$i.service"
 done
+
+# Test PropagatesStopTo= when restart (issue #26839)
+systemctl start propagatestopto-and-pullin.target
+systemctl --quiet is-active propagatestopto-and-pullin.target
+
+systemctl restart propagatestopto-and-pullin.target
+systemctl --quiet is-active propagatestopto-and-pullin.target
+systemctl --quiet is-active sleep-infinity-simple.service
+
+systemctl start propagatestopto-only.target
+systemctl --quiet is-active propagatestopto-only.target
+systemctl --quiet is-active sleep-infinity-simple.service
+
+systemctl restart propagatestopto-only.target
+assert_rc 3 systemctl --quiet is-active sleep-infinity-simple.service
+
+systemctl start propagatesstopto-indirect.target propagatestopto-and-pullin.target
+systemctl --quiet is-active propagatestopto-indirect.target
+systemctl --quiet is-active propagatestopto-and-pullin.target
+
+systemctl restart propagatestopto-indirect.target
+assert_rc 3 systemctl --quiet is-active propagatestopto-and-pullin.target
+assert_rc 3 systemctl --quiet is-active sleep-infinity-simple.service
+
+# Test restart mode direct
+systemctl start succeeds-on-restart-restartdirect.target
+assert_rc 0 systemctl --quiet is-active succeeds-on-restart-restartdirect.target
+
+systemctl start fails-on-restart-restartdirect.target || :
+assert_rc 3 systemctl --quiet is-active fails-on-restart-restartdirect.target
+
+systemctl start succeeds-on-restart.target || :
+assert_rc 3 systemctl --quiet is-active succeeds-on-restart.target
+
+systemctl start fails-on-restart.target || :
+assert_rc 3 systemctl --quiet is-active fails-on-restart.target
 
 touch /testok
