@@ -48,6 +48,20 @@ if [ ! -f "$BUILDDIR"/build.ninja ]; then
         rootprefix=/${rootprefix#/}
     fi
 
+    . /etc/os-release
+    if [ "$ID" = "centos" ] && [ "$VERSION" = "8" ]; then
+        UKIFY=false
+    else
+        UKIFY=true
+    fi
+
+    # On Debian 'loadkeys us' fails
+    if [ "$ID" = "debian" ] || [ "$ID_LIKE" = "debian" ]; then
+        DEFAULT_KEYMAP=""
+    else
+        DEFAULT_KEYMAP="us"
+    fi
+
     CONFIGURE_OPTS=(
         -D sysvinit-path="$sysvinit_path"
         -D rootprefix="$rootprefix"
@@ -133,7 +147,7 @@ if [ ! -f "$BUILDDIR"/build.ninja ]; then
         -D kernel-install=true
         -D analyze=true
         -D bpf-framework=true
-        -D ukify=true
+        -D ukify="$UKIFY"
         -D seccomp=true
         -D selinux=auto
         -D apparmor=auto
@@ -142,6 +156,7 @@ if [ ! -f "$BUILDDIR"/build.ninja ]; then
         -D first-boot-full-preset=true
         -D initrd=true
         -D fexecve=true
+        -D default-keymap="$DEFAULT_KEYMAP"
     )
 
     # On debian-like systems the library directory is not /usr/lib64 but /usr/lib/<arch-triplet>/.

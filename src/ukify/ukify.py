@@ -59,7 +59,7 @@ EFI_ARCH_MAP = {
     'x86_64'       : ['x64', 'ia32'],
     'i[3456]86'    : ['ia32'],
     'aarch64'      : ['aa64'],
-    'arm[45678]*l' : ['arm'],
+    'armv[45678]*l': ['arm'],
     'loongarch32'  : ['loongarch32'],
     'loongarch64'  : ['loongarch64'],
     'riscv32'      : ['riscv32'],
@@ -729,11 +729,17 @@ def make_uki(opts):
     uki = UKI(opts.stub)
     initrd = join_initrds(opts.initrd)
 
-    # TODO: derive public key from opts.pcr_private_keys?
     pcrpkey = opts.pcrpkey
     if pcrpkey is None:
         if opts.pcr_public_keys and len(opts.pcr_public_keys) == 1:
             pcrpkey = opts.pcr_public_keys[0]
+        elif opts.pcr_private_keys and len(opts.pcr_private_keys) == 1:
+            import cryptography.hazmat.primitives.serialization as serialization
+            privkey = serialization.load_pem_private_key(opts.pcr_private_keys[0].read_bytes(), password=None)
+            pcrpkey = privkey.public_key().public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
 
     sections = [
         # name,      content,         measure?
