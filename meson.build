@@ -111,6 +111,7 @@ endif
 prefixdir_noslash = '/' + prefixdir.strip('/')
 bindir = prefixdir / get_option('bindir')
 sbindir = prefixdir / (split_bin ? 'sbin' : 'bin')
+sbin_to_bin = split_bin ? '../bin/' : ''
 libdir = prefixdir / get_option('libdir')
 sysconfdir = prefixdir / get_option('sysconfdir')
 includedir = prefixdir / get_option('includedir')
@@ -642,10 +643,8 @@ env = find_program('env')
 rsync = find_program('rsync', required : false)
 diff = find_program('diff')
 find = find_program('find')
-meson_make_symlink = project_source_root + '/tools/meson-make-symlink.sh'
 
-mkdir_p = 'mkdir -p $DESTDIR/@0@'
-mkdir_p_mode = 'mkdir -p $DESTDIR/@0@ -m @1@'
+ln_s = ln.full_path() + ' -frsT -- "${DESTDIR:-}@0@" "${DESTDIR:-}@1@"'
 
 # If -Dxxx-path option is found, use that. Otherwise, check in $PATH,
 # /usr/sbin, /sbin, and fall back to the default from middle column.
@@ -948,9 +947,9 @@ conf.set_quoted('SYSTEMD_NSPAWN_LOCALE', nspawn_locale)
 
 default_keymap = get_option('default-keymap')
 if default_keymap == ''
-        # We canonicalize empty keymap to 'kernel', as it makes the default value
+        # We canonicalize empty keymap to '@kernel', as it makes the default value
         # in the factory provided /etc/vconsole.conf more obvious.
-        default_keymap = 'kernel'
+        default_keymap = '@kernel'
 endif
 conf.set_quoted('SYSTEMD_DEFAULT_KEYMAP', default_keymap)
 
@@ -2781,8 +2780,7 @@ install_data('LICENSE.GPL2',
 install_subdir('LICENSES',
                install_dir : docdir)
 
-meson.add_install_script('sh', '-c', mkdir_p.format(systemdstatedir))
-meson.add_install_script('sh', '-c', 'touch $DESTDIR@0@'.format(prefixdir))
+install_emptydir(systemdstatedir)
 
 ############################################################
 

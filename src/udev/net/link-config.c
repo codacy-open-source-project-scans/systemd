@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <linux/netdevice.h>
+#include <net/if.h>
+#include <linux/netdevice.h> /* Must be included after <net/if.h> */
 #include <netinet/ether.h>
 #include <unistd.h>
 
@@ -702,7 +703,7 @@ static bool enable_name_policy(void) {
         if (cached >= 0)
                 return cached;
 
-        r = proc_cmdline_get_bool("net.ifnames", &b);
+        r = proc_cmdline_get_bool("net.ifnames", /* flags = */ 0, &b);
         if (r < 0)
                 log_warning_errno(r, "Failed to parse net.ifnames= kernel command line option, ignoring: %m");
         if (r <= 0)

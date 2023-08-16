@@ -28,6 +28,7 @@ int read_partition_info(
         const char *label;
         struct fdisk_partition *p;
         uint64_t start, size, flags;
+        unsigned long ssz;
         sd_id128_t ptid, id;
         GptPartitionType type;
         size_t partno;
@@ -54,12 +55,13 @@ int read_partition_info(
         partno = fdisk_partition_get_partno(p);
 
         start = fdisk_partition_get_start(p);
-        assert(start <= UINT64_MAX / 512U);
-        start *= 512U;
+        ssz = fdisk_get_sector_size(c);
+        assert(start <= UINT64_MAX / ssz);
+        start *= ssz;
 
         size = fdisk_partition_get_size(p);
-        assert(size <= UINT64_MAX / 512U);
-        size *= 512U;
+        assert(size <= UINT64_MAX / ssz);
+        size *= ssz;
 
         label = fdisk_partition_get_name(p);
         if (!label)
@@ -119,13 +121,9 @@ int find_suitable_partition(
         assert(device);
         assert(ret);
 
-        c = fdisk_new_context();
-        if (!c)
-                return log_oom();
-
-        r = fdisk_assign_device(c, device, /* readonly= */ true);
+        r = fdisk_new_context_at(AT_FDCWD, device, /* read_only= */ true, /* sector_size= */ UINT32_MAX, &c);
         if (r < 0)
-                return log_error_errno(r, "Failed to open device '%s': %m", device);
+                return log_error_errno(r, "Failed to create fdisk context from '%s': %m", device);
 
         if (!fdisk_is_labeltype(c, FDISK_DISKLABEL_GPT))
                 return log_error_errno(SYNTHETIC_ERRNO(EHWPOISON), "Disk %s has no GPT disk label, not suitable.", device);
@@ -188,13 +186,9 @@ int patch_partition(
         if (change == 0) /* Nothing to do */
                 return 0;
 
-        c = fdisk_new_context();
-        if (!c)
-                return log_oom();
-
-        r = fdisk_assign_device(c, device, /* readonly= */ false);
+        r = fdisk_new_context_at(AT_FDCWD, device, /* read_only= */ false, /* sector_size= */ UINT32_MAX, &c);
         if (r < 0)
-                return log_error_errno(r, "Failed to open device '%s': %m", device);
+                return log_error_errno(r, "Failed to create fdisk context from '%s': %m", device);
 
         assert_se((fd = fdisk_get_devfd(c)) >= 0);
 

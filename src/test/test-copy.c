@@ -11,10 +11,12 @@
 #include "fileio.h"
 #include "fs-util.h"
 #include "hexdecoct.h"
+#include "io-util.h"
 #include "log.h"
 #include "macro.h"
 #include "mkdir.h"
 #include "path-util.h"
+#include "random-util.h"
 #include "rm-rf.h"
 #include "string-util.h"
 #include "strv.h"
@@ -65,11 +67,11 @@ TEST(copy_tree_replace_file) {
 
         /* The file exists- now overwrite original contents, and test the COPY_REPLACE flag. */
 
-        assert_se(copy_tree(src, dst, UID_INVALID, GID_INVALID, COPY_REFLINK, NULL) == -EEXIST);
+        assert_se(copy_tree(src, dst, UID_INVALID, GID_INVALID, COPY_REFLINK, NULL, NULL) == -EEXIST);
 
         assert_se(read_file_at_and_streq(AT_FDCWD, dst, "foo foo foo\n"));
 
-        assert_se(copy_tree(src, dst, UID_INVALID, GID_INVALID, COPY_REFLINK|COPY_REPLACE, NULL) == 0);
+        assert_se(copy_tree(src, dst, UID_INVALID, GID_INVALID, COPY_REFLINK|COPY_REPLACE, NULL, NULL) == 0);
 
         assert_se(read_file_at_and_streq(AT_FDCWD, dst, "bar bar\n"));
 }
@@ -90,14 +92,14 @@ TEST(copy_tree_replace_dirs) {
         assert_se(write_string_file_at(dst, "bar", "dest file 2", WRITE_STRING_FILE_CREATE) == 0);
 
         /* Copying without COPY_REPLACE should fail because the destination file already exists. */
-        assert_se(copy_tree_at(src, ".", dst, ".", UID_INVALID, GID_INVALID, COPY_REFLINK, NULL) == -EEXIST);
+        assert_se(copy_tree_at(src, ".", dst, ".", UID_INVALID, GID_INVALID, COPY_REFLINK, NULL, NULL) == -EEXIST);
 
         assert_se(read_file_at_and_streq(src, "foo", "src file 1\n"));
         assert_se(read_file_at_and_streq(src, "bar", "src file 2\n"));
         assert_se(read_file_at_and_streq(dst, "foo", "dest file 1\n"));
         assert_se(read_file_at_and_streq(dst, "bar", "dest file 2\n"));
 
-        assert_se(copy_tree_at(src, ".", dst, ".", UID_INVALID, GID_INVALID, COPY_REFLINK|COPY_REPLACE|COPY_MERGE, NULL) == 0);
+        assert_se(copy_tree_at(src, ".", dst, ".", UID_INVALID, GID_INVALID, COPY_REFLINK|COPY_REPLACE|COPY_MERGE, NULL, NULL) == 0);
 
         assert_se(read_file_at_and_streq(src, "foo", "src file 1\n"));
         assert_se(read_file_at_and_streq(src, "bar", "src file 2\n"));
@@ -189,7 +191,7 @@ TEST(copy_tree) {
         assert_se(hashmap_ensure_put(&denylist, &inode_hash_ops, cp, INT_TO_PTR(DENY_INODE)) >= 0);
         TAKE_PTR(cp);
 
-        assert_se(copy_tree(original_dir, copy_dir, UID_INVALID, GID_INVALID, COPY_REFLINK|COPY_MERGE|COPY_HARDLINKS, denylist) == 0);
+        assert_se(copy_tree(original_dir, copy_dir, UID_INVALID, GID_INVALID, COPY_REFLINK|COPY_MERGE|COPY_HARDLINKS, denylist, NULL) == 0);
 
         STRV_FOREACH(p, files) {
                 _cleanup_free_ char *buf = NULL, *f = NULL, *c = NULL;
@@ -241,8 +243,8 @@ TEST(copy_tree) {
         assert_se(stat(unixsockp, &st) >= 0);
         assert_se(S_ISSOCK(st.st_mode));
 
-        assert_se(copy_tree(original_dir, copy_dir, UID_INVALID, GID_INVALID, COPY_REFLINK, denylist) < 0);
-        assert_se(copy_tree("/tmp/inexistent/foo/bar/fsdoi", copy_dir, UID_INVALID, GID_INVALID, COPY_REFLINK, denylist) < 0);
+        assert_se(copy_tree(original_dir, copy_dir, UID_INVALID, GID_INVALID, COPY_REFLINK, denylist, NULL) < 0);
+        assert_se(copy_tree("/tmp/inexistent/foo/bar/fsdoi", copy_dir, UID_INVALID, GID_INVALID, COPY_REFLINK, denylist, NULL) < 0);
 
         ignorep = strjoina(copy_dir, "ignore/file");
         assert_se(RET_NERRNO(access(ignorep, F_OK)) == -ENOENT);
@@ -432,6 +434,77 @@ TEST_RET(copy_holes) {
 
         close(fd);
         close(fd_copy);
+
+        return 0;
+}
+
+TEST_RET(copy_holes_with_gaps) {
+        _cleanup_(rm_rf_physical_and_freep) char *t = NULL;
+        _cleanup_close_ int tfd = -EBADF, fd = -EBADF, fd_copy = -EBADF;
+        struct stat st;
+        off_t blksz;
+        char *buf;
+        int r;
+
+        assert_se((tfd = mkdtemp_open(NULL, 0, &t)) >= 0);
+        assert_se((fd = openat(tfd, "src", O_CREAT | O_RDWR, 0600)) >= 0);
+        assert_se((fd_copy = openat(tfd, "dst", O_CREAT | O_WRONLY, 0600)) >= 0);
+
+        assert_se(fstat(fd, &st) >= 0);
+        blksz = st.st_blksize;
+        buf = alloca_safe(blksz);
+        memset(buf, 1, blksz);
+
+        /* Create a file with:
+         *  - hole of 1 block
+         *  - data of 2 block
+         *  - hole of 2 blocks
+         *  - data of 1 block
+         *
+         * Since sparse files are based on blocks and not bytes, we need to make
+         * sure that the holes are aligned to the block size.
+         */
+
+        r = RET_NERRNO(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, blksz));
+        if (ERRNO_IS_NOT_SUPPORTED(r))
+                return log_tests_skipped("Filesystem doesn't support hole punching");
+
+        assert_se(lseek(fd, blksz, SEEK_CUR) >= 0);
+        assert_se(loop_write(fd, buf, blksz, 0) >= 0);
+        assert_se(loop_write(fd, buf, blksz, 0) >= 0);
+        assert_se(lseek(fd, 2 * blksz, SEEK_CUR) >= 0);
+        assert_se(loop_write(fd, buf, blksz, 0) >= 0);
+        assert_se(lseek(fd, 0, SEEK_SET) >= 0);
+        assert_se(fsync(fd) >= 0);
+
+        /* Copy to the start of the second hole */
+        assert_se(copy_bytes(fd, fd_copy, 3 * blksz, COPY_HOLES) >= 0);
+        assert_se(fstat(fd_copy, &st) >= 0);
+        assert_se(st.st_size == 3 * blksz);
+
+        /* Copy to the middle of the second hole */
+        assert_se(lseek(fd, 0, SEEK_SET) >= 0);
+        assert_se(lseek(fd_copy, 0, SEEK_SET) >= 0);
+        assert_se(ftruncate(fd_copy, 0) >= 0);
+        assert_se(copy_bytes(fd, fd_copy, 4 * blksz, COPY_HOLES) >= 0);
+        assert_se(fstat(fd_copy, &st) >= 0);
+        assert_se(st.st_size == 4 * blksz);
+
+        /* Copy to the end of the second hole */
+        assert_se(lseek(fd, 0, SEEK_SET) >= 0);
+        assert_se(lseek(fd_copy, 0, SEEK_SET) >= 0);
+        assert_se(ftruncate(fd_copy, 0) >= 0);
+        assert_se(copy_bytes(fd, fd_copy, 5 * blksz, COPY_HOLES) >= 0);
+        assert_se(fstat(fd_copy, &st) >= 0);
+        assert_se(st.st_size == 5 * blksz);
+
+        /* Copy everything */
+        assert_se(lseek(fd, 0, SEEK_SET) >= 0);
+        assert_se(lseek(fd_copy, 0, SEEK_SET) >= 0);
+        assert_se(ftruncate(fd_copy, 0) >= 0);
+        assert_se(copy_bytes(fd, fd_copy, UINT64_MAX, COPY_HOLES) >= 0);
+        assert_se(fstat(fd_copy, &st) >= 0);
+        assert_se(st.st_size == 6 * blksz);
 
         return 0;
 }

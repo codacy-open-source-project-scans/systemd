@@ -17,6 +17,7 @@ cleanup() {(
     umount "${image_dir}/app0"
     umount "${image_dir}/app1"
     umount "${image_dir}/app-nodistro"
+    umount "${image_dir}/service-scoped-test"
     rm -rf "${image_dir}"
 )}
 
@@ -376,11 +377,19 @@ systemd-run -P --property ExtensionImages="/usr/share/app0.raw /usr/share/app1.r
 systemd-run -P --property ExtensionImages="/usr/share/app0.raw /usr/share/app1.raw" --property RootImage="${image}.raw" cat /opt/script1.sh | grep -q -F "extension-release.app2"
 systemd-run -P --property ExtensionImages="/usr/share/app0.raw /usr/share/app1.raw" --property RootImage="${image}.raw" cat /usr/lib/systemd/system/other_file | grep -q -F "MARKER=1"
 systemd-run -P --property ExtensionImages=/usr/share/app-nodistro.raw --property RootImage="${image}.raw" cat /usr/lib/systemd/system/some_file | grep -q -F "MARKER=1"
+systemd-run -P --property ExtensionImages=/etc/service-scoped-test.raw --property RootImage="${image}.raw" cat /etc/systemd/system/some_file | grep -q -F "MARKER_CONFEXT_123"
 # Check that using a symlink to NAME-VERSION.raw works as long as the symlink has the correct name NAME.raw
 mkdir -p /usr/share/symlink-test/
 cp /usr/share/app-nodistro.raw /usr/share/symlink-test/app-nodistro-v1.raw
 ln -fs /usr/share/symlink-test/app-nodistro-v1.raw /usr/share/symlink-test/app-nodistro.raw
 systemd-run -P --property ExtensionImages=/usr/share/symlink-test/app-nodistro.raw --property RootImage="${image}.raw" cat /usr/lib/systemd/system/some_file | grep -q -F "MARKER=1"
+
+# Symlink check again but for confext
+mkdir -p /etc/symlink-test/
+cp /etc/service-scoped-test.raw /etc/symlink-test/service-scoped-test-v1.raw
+ln -fs /etc/symlink-test/service-scoped-test-v1.raw /etc/symlink-test/service-scoped-test.raw
+systemd-run -P --property ExtensionImages=/etc/symlink-test/service-scoped-test.raw --property RootImage="${image}.raw" cat /etc/systemd/system/some_file | grep -q -F "MARKER_CONFEXT_123"
+
 cat >/run/systemd/system/testservice-50e.service <<EOF
 [Service]
 MountAPIVFS=yes
@@ -399,12 +408,13 @@ systemctl start testservice-50e.service
 systemctl is-active testservice-50e.service
 
 # ExtensionDirectories will set up an overlay
-mkdir -p "${image_dir}/app0" "${image_dir}/app1" "${image_dir}/app-nodistro"
+mkdir -p "${image_dir}/app0" "${image_dir}/app1" "${image_dir}/app-nodistro" "${image_dir}/service-scoped-test"
 (! systemd-run -P --property ExtensionDirectories="${image_dir}/nonexistent" --property RootImage="${image}.raw" cat /opt/script0.sh)
 (! systemd-run -P --property ExtensionDirectories="${image_dir}/app0" --property RootImage="${image}.raw" cat /opt/script0.sh)
 systemd-dissect --mount /usr/share/app0.raw "${image_dir}/app0"
 systemd-dissect --mount /usr/share/app1.raw "${image_dir}/app1"
 systemd-dissect --mount /usr/share/app-nodistro.raw "${image_dir}/app-nodistro"
+systemd-dissect --mount /etc/service-scoped-test.raw "${image_dir}/service-scoped-test"
 systemd-run -P --property ExtensionDirectories="${image_dir}/app0" --property RootImage="${image}.raw" cat /opt/script0.sh | grep -q -F "extension-release.app0"
 systemd-run -P --property ExtensionDirectories="${image_dir}/app0" --property RootImage="${image}.raw" cat /usr/lib/systemd/system/some_file | grep -q -F "MARKER=1"
 systemd-run -P --property ExtensionDirectories="${image_dir}/app0 ${image_dir}/app1" --property RootImage="${image}.raw" cat /opt/script0.sh | grep -q -F "extension-release.app0"
@@ -412,6 +422,7 @@ systemd-run -P --property ExtensionDirectories="${image_dir}/app0 ${image_dir}/a
 systemd-run -P --property ExtensionDirectories="${image_dir}/app0 ${image_dir}/app1" --property RootImage="${image}.raw" cat /opt/script1.sh | grep -q -F "extension-release.app2"
 systemd-run -P --property ExtensionDirectories="${image_dir}/app0 ${image_dir}/app1" --property RootImage="${image}.raw" cat /usr/lib/systemd/system/other_file | grep -q -F "MARKER=1"
 systemd-run -P --property ExtensionDirectories="${image_dir}/app-nodistro" --property RootImage="${image}.raw" cat /usr/lib/systemd/system/some_file | grep -q -F "MARKER=1"
+systemd-run -P --property ExtensionDirectories="${image_dir}/service-scoped-test" --property RootImage="${image}.raw" cat /etc/systemd/system/some_file | grep -q -F "MARKER_CONFEXT_123"
 cat >/run/systemd/system/testservice-50f.service <<EOF
 [Service]
 MountAPIVFS=yes
@@ -469,6 +480,48 @@ T="/tmp/mounthelper.$RANDOM"
 mount -t ddi "${image}.gpt" "$T" -o ro,X-mount.mkdir,discard
 umount -R "$T"
 rmdir "$T"
+
+LOOP="$(systemd-dissect --attach --loop-ref=waldo "${image}.raw")"
+
+# Wait until the symlinks we want to test are established
+udevadm trigger -w "$LOOP"
+
+# Check if the /dev/loop/* symlinks really reference the right device
+test /dev/disk/by-loop-ref/waldo -ef "$LOOP"
+
+if [ "$(stat -c '%Hd:%Ld' "${image}.raw")" != '?d:?d' ] ; then
+   # Old stat didn't know the %Hd and %Ld specifiers and turned them into ?d
+   # instead. Let's simply skip the test on such old systems.
+   test "$(stat -c '/dev/disk/by-loop-inode/%Hd:%Ld-%i' "${image}.raw")" -ef "$LOOP"
+fi
+
+# Detach by loopback device
+systemd-dissect --detach "$LOOP"
+
+# Test long reference name.
+# Note, sizeof_field(struct loop_info64, lo_file_name) == 64,
+# and --loop-ref accepts upto 63 characters, and udev creates symlink
+# based on the name when it has upto _62_ characters.
+name="$(for _ in {1..62}; do echo -n 'x'; done)"
+LOOP="$(systemd-dissect --attach --loop-ref="$name" "${image}.raw")"
+udevadm trigger -w "$LOOP"
+
+# Check if the /dev/disk/by-loop-ref/$name symlink really references the right device
+test "/dev/disk/by-loop-ref/$name" -ef "$LOOP"
+
+# Detach by the /dev/disk/by-loop-ref symlink
+systemd-dissect --detach "/dev/disk/by-loop-ref/$name"
+
+name="$(for _ in {1..63}; do echo -n 'x'; done)"
+LOOP="$(systemd-dissect --attach --loop-ref="$name" "${image}.raw")"
+udevadm trigger -w "$LOOP"
+
+# Check if the /dev/disk/by-loop-ref/$name symlink does not exist
+test ! -e "/dev/disk/by-loop-ref/$name"
+
+# Detach by backing inode
+systemd-dissect --detach "${image}.raw"
+(! systemd-dissect --detach "${image}.raw")
 
 # check for confext functionality
 mkdir -p /run/confexts/test/etc/extension-release.d

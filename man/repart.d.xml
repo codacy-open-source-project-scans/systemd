@@ -501,6 +501,21 @@
       </varlistentry>
 
       <varlistentry>
+        <term><varname>Subvolumes=</varname></term>
+
+        <listitem><para>Takes one or more absolute paths, separated by whitespace, each declaring a directory
+        that should be a subvolume within the new file system. This option may be used more than once to
+        specify multiple directories. Note that this setting does not create the directories themselves, that
+        can be configured with <varname>MakeDirectories=</varname> and <varname>CopyFiles=</varname>.</para>
+
+        <para>Note that this option only takes effect if the target filesystem supports subvolumes, such as
+        <literal>btrfs</literal>.</para>
+
+        <para>Note that due to limitations of <literal>mkfs.btrfs</literal>, this option is only supported
+        when running with <option>--offline=no</option>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><varname>Encrypt=</varname></term>
 
         <listitem><para>Takes one of <literal>off</literal>, <literal>key-file</literal>,
@@ -559,6 +574,24 @@
         <listitem><para>Takes a short, user-chosen identifier string. This setting is used to find sibling
         verity partitions for the current verity partition. See the description for
         <varname>Verity=</varname>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>VerityDataBlockSizeBytes=</varname></term>
+
+        <listitem><para>Configures the data block size of the generated verity hash partition. Must be between 512 and
+        4096 bytes and must be a power of 2. Defaults to the sector size if configured explicitly, or the underlying
+        block device sector size, or 4K if systemd-repart is not operating on a block device.
+        </para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>VerityHashBlockSizeBytes=</varname></term>
+
+        <listitem><para>Configures the hash block size of the generated verity hash partition. Must be between 512 and
+        4096 bytes and must be a power of 2. Defaults to the sector size if configured explicitly, or the underlying
+        block device sector size, or 4K if systemd-repart is not operating on a block device.
+        </para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -816,6 +849,9 @@ VerityMatchKey=root
 Type=root-verity
 Verity=hash
 VerityMatchKey=root
+# Explicitly set the hash and data block size to 4K
+VerityDataBlockSizeBytes=4096
+VerityHashBlockSizeBytes=4096
 </programlisting></para>
     </example>
 

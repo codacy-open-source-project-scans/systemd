@@ -1936,7 +1936,7 @@ static int mount_partition(
 
         if (directory) {
                 /* Automatically create missing mount points inside the image, if necessary. */
-                r = mkdir_p_root(where, directory, uid_shift, (gid_t) uid_shift, 0755);
+                r = mkdir_p_root(where, directory, uid_shift, (gid_t) uid_shift, 0755, NULL);
                 if (r < 0 && r != -EROFS)
                         return r;
 
@@ -2040,7 +2040,7 @@ static int mount_point_is_available(const char *where, const char *path, bool mi
                 return false;
         if (r < 0)
                 return log_debug_errno(r, "Failed to check directory \"%s\": %m", p);
-        return true;
+        return r > 0;
 }
 
 int dissected_image_mount(
