@@ -5,7 +5,7 @@
 #include "macro-fundamental.h"
 #include "measure.h"
 #include "proto/tcg.h"
-#include "tpm-pcr.h"
+#include "tpm2-pcr.h"
 #include "util.h"
 
 static EFI_STATUS tpm1_measure_to_pcr_and_event_log(
@@ -54,6 +54,12 @@ static EFI_STATUS tpm2_measure_to_pcr_and_event_log(
 
         assert(tcg);
         assert(description);
+
+        /* NB: We currently record everything as EV_IPL. Which sucks, because it makes it hard to
+         * recognize from the event log which of the events are ours. Measurement logs are kinda API hence
+         * this is hard to change for existing, established events. But for future additions, let's use
+         * EV_EVENT_TAG instead, with a tag of our choosing that makes clear what precisely we are measuring
+         * here. */
 
         desc_len = strsize16(description);
         tcg_event = xmalloc(offsetof(EFI_TCG2_EVENT, Event) + desc_len);
@@ -196,7 +202,7 @@ EFI_STATUS tpm_log_load_options(const char16_t *load_options, bool *ret_measured
         /* Measures a load options string into the TPM2, i.e. the kernel command line */
 
         err = tpm_log_event(
-                        TPM_PCR_INDEX_KERNEL_PARAMETERS,
+                        TPM2_PCR_KERNEL_CONFIG,
                         POINTER_TO_PHYSICAL_ADDRESS(load_options),
                         strsize16(load_options),
                         load_options,
@@ -204,8 +210,8 @@ EFI_STATUS tpm_log_load_options(const char16_t *load_options, bool *ret_measured
         if (err != EFI_SUCCESS)
                 return log_error_status(
                                 err,
-                                "Unable to add load options (i.e. kernel command) line measurement to PCR %u: %m",
-                                TPM_PCR_INDEX_KERNEL_PARAMETERS);
+                                "Unable to add load options (i.e. kernel command) line measurement to PCR %i: %m",
+                                TPM2_PCR_KERNEL_CONFIG);
 
         if (ret_measured)
                 *ret_measured = measured;

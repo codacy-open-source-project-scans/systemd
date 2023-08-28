@@ -402,27 +402,15 @@ int sd_dhcp_client_set_client_id(
  * without further modification. Otherwise, if duid_type is supported, DUID
  * is set based on that type. Otherwise, an error is returned.
  */
-static int dhcp_client_set_iaid_duid_internal(
+static int dhcp_client_set_iaid(
                 sd_dhcp_client *client,
                 bool iaid_set,
-                uint32_t iaid,
-                DUIDType duid_type,
-                const void *duid,
-                size_t duid_len,
-                usec_t llt_time) {
+                uint32_t iaid) {
 
-        size_t len;
         int r;
 
         assert_return(client, -EINVAL);
         assert_return(!sd_dhcp_client_is_running(client), -EBUSY);
-        assert_return(duid_len == 0 || duid, -EINVAL);
-
-        if (duid) {
-                r = dhcp_validate_duid_len(duid_type, duid_len, true);
-                if (r < 0)
-                        return log_dhcp_client_errno(client, r, "Failed to validate length of DUID: %m");
-        }
 
         zero(client->client_id);
         client->client_id.type = 255;
@@ -437,38 +425,7 @@ static int dhcp_client_set_iaid_duid_internal(
                         return log_dhcp_client_errno(client, r, "Failed to set IAID: %m");
         }
 
-        if (duid) {
-                client->client_id.ns.duid.type = htobe16(duid_type);
-                memcpy(&client->client_id.ns.duid.raw.data, duid, duid_len);
-                len = sizeof(client->client_id.ns.duid.type) + duid_len;
-
-        } else {
-                r = dhcp_identifier_set_duid(duid_type, &client->hw_addr,
-                                             client->arp_type, llt_time, client->test_mode,
-                                             &client->client_id.ns.duid, &len);
-                if (r == -EOPNOTSUPP)
-                        return log_dhcp_client_errno(client, r,
-                                                     "Failed to set %s. MAC address is not set or "
-                                                     "interface type is not supported.",
-                                                     duid_type_to_string(duid_type));
-                if (r < 0)
-                        return log_dhcp_client_errno(client, r, "Failed to set %s: %m",
-                                                     duid_type_to_string(duid_type));
-        }
-
-        client->client_id_len = sizeof(client->client_id.type) + sizeof(client->client_id.ns.iaid) + len;
-
         return 0;
-}
-
-int sd_dhcp_client_set_iaid_duid(
-                sd_dhcp_client *client,
-                bool iaid_set,
-                uint32_t iaid,
-                uint16_t duid_type,
-                const void *duid,
-                size_t duid_len) {
-        return dhcp_client_set_iaid_duid_internal(client, iaid_set, iaid, duid_type, duid, duid_len, 0);
 }
 
 int sd_dhcp_client_set_iaid_duid_llt(
@@ -476,7 +433,124 @@ int sd_dhcp_client_set_iaid_duid_llt(
                 bool iaid_set,
                 uint32_t iaid,
                 usec_t llt_time) {
-        return dhcp_client_set_iaid_duid_internal(client, iaid_set, iaid, DUID_TYPE_LLT, NULL, 0, llt_time);
+
+        size_t len;
+        int r;
+
+        assert_return(client, -EINVAL);
+        assert_return(!sd_dhcp_client_is_running(client), -EBUSY);
+
+        r = dhcp_client_set_iaid(client, iaid_set, iaid);
+        if (r < 0)
+                return r;
+
+        r = dhcp_identifier_set_duid_llt(&client->hw_addr, client->arp_type, llt_time, &client->client_id.ns.duid, &len);
+        if (r < 0)
+                return log_dhcp_client_errno(client, r, "Failed to set DUID-LLT: %m");
+
+        client->client_id_len = sizeof(client->client_id.type) + sizeof(client->client_id.ns.iaid) + len;
+
+        return 0;
+}
+
+int sd_dhcp_client_set_iaid_duid_ll(
+                sd_dhcp_client *client,
+                bool iaid_set,
+                uint32_t iaid) {
+
+        size_t len;
+        int r;
+
+        assert_return(client, -EINVAL);
+        assert_return(!sd_dhcp_client_is_running(client), -EBUSY);
+
+        r = dhcp_client_set_iaid(client, iaid_set, iaid);
+        if (r < 0)
+                return r;
+
+        r = dhcp_identifier_set_duid_ll(&client->hw_addr, client->arp_type, &client->client_id.ns.duid, &len);
+        if (r < 0)
+                return log_dhcp_client_errno(client, r, "Failed to set DUID-LL: %m");
+
+        client->client_id_len = sizeof(client->client_id.type) + sizeof(client->client_id.ns.iaid) + len;
+
+        return 0;
+}
+
+int sd_dhcp_client_set_iaid_duid_en(
+                sd_dhcp_client *client,
+                bool iaid_set,
+                uint32_t iaid) {
+
+        size_t len;
+        int r;
+
+        assert_return(client, -EINVAL);
+        assert_return(!sd_dhcp_client_is_running(client), -EBUSY);
+
+        r = dhcp_client_set_iaid(client, iaid_set, iaid);
+        if (r < 0)
+                return r;
+
+        r = dhcp_identifier_set_duid_en(client->test_mode, &client->client_id.ns.duid, &len);
+        if (r < 0)
+                return log_dhcp_client_errno(client, r, "Failed to set DUID-EN: %m");
+
+        client->client_id_len = sizeof(client->client_id.type) + sizeof(client->client_id.ns.iaid) + len;
+
+        return 0;
+}
+
+int sd_dhcp_client_set_iaid_duid_uuid(
+                sd_dhcp_client *client,
+                bool iaid_set,
+                uint32_t iaid) {
+
+        size_t len;
+        int r;
+
+        assert_return(client, -EINVAL);
+        assert_return(!sd_dhcp_client_is_running(client), -EBUSY);
+
+        r = dhcp_client_set_iaid(client, iaid_set, iaid);
+        if (r < 0)
+                return r;
+
+        r = dhcp_identifier_set_duid_uuid(&client->client_id.ns.duid, &len);
+        if (r < 0)
+                return log_dhcp_client_errno(client, r, "Failed to set DUID-UUID: %m");
+
+        client->client_id_len = sizeof(client->client_id.type) + sizeof(client->client_id.ns.iaid) + len;
+
+        return 0;
+}
+
+int sd_dhcp_client_set_iaid_duid_raw(
+                sd_dhcp_client *client,
+                bool iaid_set,
+                uint32_t iaid,
+                uint16_t duid_type,
+                const uint8_t *duid,
+                size_t duid_len) {
+
+        size_t len;
+        int r;
+
+        assert_return(client, -EINVAL);
+        assert_return(!sd_dhcp_client_is_running(client), -EBUSY);
+        assert_return(duid || duid_len == 0, -EINVAL);
+
+        r = dhcp_client_set_iaid(client, iaid_set, iaid);
+        if (r < 0)
+                return r;
+
+        r = dhcp_identifier_set_duid_raw(duid_type, duid, duid_len, &client->client_id.ns.duid, &len);
+        if (r < 0)
+                return log_dhcp_client_errno(client, r, "Failed to set DUID: %m");
+
+        client->client_id_len = sizeof(client->client_id.type) + sizeof(client->client_id.ns.iaid) + len;
+
+        return 0;
 }
 
 void dhcp_client_set_test_mode(sd_dhcp_client *client, bool test_mode) {
@@ -679,7 +753,7 @@ static int client_initialize(sd_dhcp_client *client) {
 
         client->attempt = 0;
 
-        client->state = DHCP_STATE_INIT;
+        client->state = DHCP_STATE_STOPPED;
         client->xid = 0;
 
         client->lease = sd_dhcp_lease_unref(client->lease);
@@ -798,21 +872,9 @@ static int client_message_init(
 
         /* If no client identifier exists, construct an RFC 4361-compliant one */
         if (client->client_id_len == 0) {
-                size_t duid_len;
-
-                client->client_id.type = 255;
-
-                r = dhcp_identifier_set_iaid(client->dev, &client->hw_addr,
-                                             /* legacy_unstable_byteorder = */ true,
-                                             &client->client_id.ns.iaid);
+                r = sd_dhcp_client_set_iaid_duid_en(client, /* iaid_set = */ false, /* iaid = */ 0);
                 if (r < 0)
                         return r;
-
-                r = dhcp_identifier_set_duid_en(client->test_mode, &client->client_id.ns.duid, &duid_len);
-                if (r < 0)
-                        return r;
-
-                client->client_id_len = sizeof(client->client_id.type) + sizeof(client->client_id.ns.iaid) + duid_len;
         }
 
         /* Some DHCP servers will refuse to issue an DHCP lease if the Client
@@ -1372,7 +1434,7 @@ static int client_start_delayed(sd_dhcp_client *client) {
         assert_return(client->ifindex > 0, -EINVAL);
         assert_return(client->fd < 0, -EBUSY);
         assert_return(client->xid == 0, -EINVAL);
-        assert_return(IN_SET(client->state, DHCP_STATE_INIT, DHCP_STATE_INIT_REBOOT), -EBUSY);
+        assert_return(IN_SET(client->state, DHCP_STATE_STOPPED, DHCP_STATE_INIT_REBOOT), -EBUSY);
 
         client->xid = random_u32();
 
@@ -1386,8 +1448,10 @@ static int client_start_delayed(sd_dhcp_client *client) {
         }
         client->fd = r;
 
-        if (IN_SET(client->state, DHCP_STATE_INIT, DHCP_STATE_INIT_REBOOT))
-                client->start_time = now(CLOCK_BOOTTIME);
+        client->start_time = now(CLOCK_BOOTTIME);
+
+        if (client->state == DHCP_STATE_STOPPED)
+                client->state = DHCP_STATE_INIT;
 
         return client_initialize_events(client, client_receive_message_raw);
 }
@@ -1848,10 +1912,9 @@ static int client_receive_message_udp(
         assert(s);
 
         buflen = next_datagram_size_fd(fd);
+        if (ERRNO_IS_NEG_TRANSIENT(buflen) || ERRNO_IS_NEG_DISCONNECT(buflen))
+                return 0;
         if (buflen < 0) {
-                if (ERRNO_IS_TRANSIENT(buflen) || ERRNO_IS_DISCONNECT(buflen))
-                        return 0;
-
                 log_dhcp_client_errno(client, buflen, "Failed to determine datagram size to read, ignoring: %m");
                 return 0;
         }
@@ -1941,10 +2004,9 @@ static int client_receive_message_raw(
         assert(s);
 
         buflen = next_datagram_size_fd(fd);
+        if (ERRNO_IS_NEG_TRANSIENT(buflen) || ERRNO_IS_NEG_DISCONNECT(buflen))
+                return 0;
         if (buflen < 0) {
-                if (ERRNO_IS_TRANSIENT(buflen) || ERRNO_IS_DISCONNECT(buflen))
-                        return 0;
-
                 log_dhcp_client_errno(client, buflen, "Failed to determine datagram size to read, ignoring: %m");
                 return 0;
         }
@@ -1956,10 +2018,9 @@ static int client_receive_message_raw(
         iov = IOVEC_MAKE(packet, buflen);
 
         len = recvmsg_safe(fd, &msg, 0);
+        if (ERRNO_IS_NEG_TRANSIENT(len) || ERRNO_IS_NEG_DISCONNECT(len))
+                return 0;
         if (len < 0) {
-                if (ERRNO_IS_TRANSIENT(len) || ERRNO_IS_DISCONNECT(len))
-                        return 0;
-
                 log_dhcp_client_errno(client, len, "Could not receive message from raw socket, ignoring: %m");
                 return 0;
         }
@@ -2002,7 +2063,7 @@ int sd_dhcp_client_is_running(sd_dhcp_client *client) {
         if (!client)
                 return 0;
 
-        return !IN_SET(client->state, DHCP_STATE_INIT, DHCP_STATE_STOPPED);
+        return client->state != DHCP_STATE_STOPPED;
 }
 
 int sd_dhcp_client_start(sd_dhcp_client *client) {
@@ -2204,7 +2265,7 @@ int sd_dhcp_client_new(sd_dhcp_client **ret, int anonymize) {
 
         *client = (sd_dhcp_client) {
                 .n_ref = 1,
-                .state = DHCP_STATE_INIT,
+                .state = DHCP_STATE_STOPPED,
                 .ifindex = -1,
                 .fd = -EBADF,
                 .mtu = DHCP_MIN_PACKET_SIZE,

@@ -56,6 +56,7 @@ typedef struct {
         char16_t *loader;
         char16_t *devicetree;
         char16_t *options;
+        bool options_implied; /* If true, these options are implied if we invoke the PE binary without any parameters (as in: UKI). If false we must specify these options explicitly. */
         char16_t **initrd;
         char16_t key;
         EFI_STATUS (*call)(void);
@@ -881,7 +882,7 @@ static bool menu_run(
                 case KEYPRESS(0, 0, 'H'):
                 case KEYPRESS(0, 0, '?'):
                         /* This must stay below 80 characters! Q/v/Ctrl+l/f deliberately not advertised. */
-                        status = xstrdup16(u"(d)efault (t/T)timeout (e)dit (r/R)resolution (p)rint (h)elp");
+                        status = xstrdup16(u"(d)efault (t/T)imeout (e)dit (r/R)esolution (p)rint (O)ff re(B)oot (h)elp");
                         break;
 
                 case KEYPRESS(0, 0, 'Q'):
@@ -918,17 +919,21 @@ static bool menu_run(
                 case KEYPRESS(0, 0, 'e'):
                 case KEYPRESS(0, 0, 'E'):
                         /* only the options of configured entries can be edited */
-                        if (!config->editor || !IN_SET(config->entries[idx_highlight]->type,
-                            LOADER_EFI, LOADER_LINUX, LOADER_UNIFIED_LINUX))
+                        if (!config->editor ||
+                            !IN_SET(config->entries[idx_highlight]->type, LOADER_EFI, LOADER_LINUX, LOADER_UNIFIED_LINUX)) {
+                                status = xstrdup16(u"Entry does not support editing the command line.");
                                 break;
+                        }
 
                         /* Unified kernels that are signed as a whole will not accept command line options
                          * when secure boot is enabled unless there is none embedded in the image. Do not try
                          * to pretend we can edit it to only have it be ignored. */
                         if (config->entries[idx_highlight]->type == LOADER_UNIFIED_LINUX &&
                             secure_boot_enabled() &&
-                            config->entries[idx_highlight]->options)
+                            config->entries[idx_highlight]->options) {
+                                status = xstrdup16(u"Entry not editable in SecureBoot mode.");
                                 break;
+                        }
 
                         /* The edit line may end up on the last line of the screen. And even though we're
                          * not telling the firmware to advance the line, it still does in this one case,
@@ -938,6 +943,10 @@ static bool menu_run(
                         print_at(1, y_status, COLOR_EDIT, clearline + 2);
                         exit = line_edit(&config->entries[idx_highlight]->options, x_max - 2, y_status);
                         print_at(1, y_status, COLOR_NORMAL, clearline + 2);
+
+                        /* The options string was now edited, hence we have to pass it to the invoked
+                         * binary. */
+                        config->entries[idx_highlight]->options_implied = false;
                         break;
 
                 case KEYPRESS(0, 0, 'v'):
@@ -959,6 +968,7 @@ static bool menu_run(
 
                 case KEYPRESS(EFI_CONTROL_PRESSED, 0, 'l'):
                 case KEYPRESS(EFI_CONTROL_PRESSED, 0, CHAR_CTRL('l')):
+                case 'L': /* only uppercase, do not conflict with lower-case 'l' which picks first Linux entry */
                         clear = true;
                         break;
 
@@ -1002,6 +1012,14 @@ static bool menu_run(
                                 status = xstrdup16(u"Press Enter to reboot into firmware interface.");
                         } else
                                 status = xstrdup16(u"Reboot into firmware interface not supported.");
+                        break;
+
+                case KEYPRESS(0, 0, 'O'): /* Only uppercase, so that it can't be hit so easily fat-fingered, but still works safely over serial */
+                        RT->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+                        break;
+
+                case KEYPRESS(0, 0, 'B'): /* ditto */
+                        RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
                         break;
 
                 default:
@@ -1099,7 +1117,7 @@ static void config_entry_free(ConfigEntry *entry) {
         free(entry);
 }
 
-static inline void config_entry_freep(ConfigEntry **entry) {
+static void config_entry_freep(ConfigEntry **entry) {
         config_entry_free(*entry);
 }
 
@@ -2235,6 +2253,7 @@ static void config_entry_add_unified(
                 if (err == EFI_SUCCESS) {
                         entry->options = xstrn8_to_16(content, cmdline_len);
                         mangle_stub_cmdline(entry->options);
+                        entry->options_implied = true;
                 }
         }
 }
@@ -2385,7 +2404,10 @@ static EFI_STATUS image_start(
         if (err != EFI_SUCCESS)
                 return log_error_status(err, "Error getting LoadedImageProtocol handle: %m");
 
-        char16_t *options = options_initrd ?: entry->options;
+        /* If we had to append an initrd= entry to the command line, we have to pass it, and measure
+         * it. Otherwise, only pass/measure it if it is not implicit anyway (i.e. embedded into the UKI or
+         * so). */
+        char16_t *options = options_initrd ?: entry->options_implied ? NULL : entry->options;
         if (options) {
                 loaded_image->LoadOptions = options;
                 loaded_image->LoadOptionsSize = strsize16(options);

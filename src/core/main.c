@@ -8,9 +8,6 @@
 #include <sys/prctl.h>
 #include <sys/utsname.h>
 #include <unistd.h>
-#if HAVE_SECCOMP
-#include <seccomp.h>
-#endif
 #if HAVE_VALGRIND_VALGRIND_H
 #  include <valgrind/valgrind.h>
 #endif
@@ -82,9 +79,7 @@
 #include "psi-util.h"
 #include "random-util.h"
 #include "rlimit-util.h"
-#if HAVE_SECCOMP
 #include "seccomp-util.h"
-#endif
 #include "selinux-setup.h"
 #include "selinux-util.h"
 #include "signal-util.h"
@@ -1397,11 +1392,11 @@ static int setup_os_release(RuntimeScope scope) {
         }
 
         if (scope == RUNTIME_SCOPE_SYSTEM) {
-                os_release_dst = strdup("/run/systemd/propagate/os-release");
+                os_release_dst = strdup("/run/systemd/propagate/.os-release-stage/os-release");
                 if (!os_release_dst)
                         return log_oom_debug();
         } else {
-                if (asprintf(&os_release_dst, "/run/user/" UID_FMT "/systemd/propagate/os-release", geteuid()) < 0)
+                if (asprintf(&os_release_dst, "/run/user/" UID_FMT "/systemd/propagate/.os-release-stage/os-release", geteuid()) < 0)
                         return log_oom_debug();
         }
 
@@ -1409,7 +1404,7 @@ static int setup_os_release(RuntimeScope scope) {
         if (r < 0)
                 return log_debug_errno(r, "Failed to create parent directory of %s, ignoring: %m", os_release_dst);
 
-        r = copy_file(os_release_src, os_release_dst, /* open_flags= */ 0, 0644, COPY_MAC_CREATE|COPY_TRUNCATE);
+        r = copy_file_atomic(os_release_src, os_release_dst, 0644, COPY_MAC_CREATE|COPY_REPLACE);
         if (r < 0)
                 return log_debug_errno(r, "Failed to create %s, ignoring: %m", os_release_dst);
 

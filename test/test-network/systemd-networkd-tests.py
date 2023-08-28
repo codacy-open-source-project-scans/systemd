@@ -2946,6 +2946,7 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         self.assertIn('192.168.1.1 proto static scope link initcwnd 20', output)
         self.assertIn('192.168.1.2 proto static scope link initrwnd 30', output)
         self.assertIn('192.168.1.3 proto static scope link advmss 30', output)
+        self.assertIn('192.168.1.4 proto static scope link hoplimit 122', output)
         self.assertIn('multicast 149.10.123.4 proto static', output)
 
         print('### ip -4 route show dev dummy98 default')
@@ -3175,6 +3176,7 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         print(output)
         self.assertIn('149.10.124.66 proto static', output)
         self.assertIn('congctl dctcp', output)
+        self.assertIn('rto_min 300s', output)
 
     @expectedFailureIfModuleIsNotAvailable('vrf')
     def test_route_vrf(self):
@@ -5017,6 +5019,31 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertIn('DHCPREQUEST(veth-peer)', output)
         self.assertIn('DHCPREPLY(veth-peer)', output)
         self.assertNotIn('rapid-commit', output)
+
+    def test_dhcp_client_ipv6_only_with_custom_client_identifier(self):
+        copy_network_unit('25-veth.netdev', '25-dhcp-server-veth-peer.network', '25-dhcp-client-ipv6-only-custom-client-identifier.network')
+
+        start_networkd()
+        self.wait_online(['veth-peer:carrier'])
+        start_dnsmasq()
+        self.wait_online(['veth99:routable', 'veth-peer:routable'])
+
+        # checking address
+        output = check_output('ip address show dev veth99 scope global')
+        print(output)
+        self.assertRegex(output, r'inet6 2600::[0-9a-f:]*/128 scope global dynamic noprefixroute')
+        self.assertNotIn('192.168.5', output)
+
+        print('## dnsmasq log')
+        output = read_dnsmasq_log_file()
+        print(output)
+        self.assertIn('DHCPSOLICIT(veth-peer) 00:42:00:00:ab:11:f9:2a:c2:77:29:f9:5c:00', output)
+        self.assertNotIn('DHCPADVERTISE(veth-peer)', output)
+        self.assertNotIn('DHCPREQUEST(veth-peer)', output)
+        self.assertIn('DHCPREPLY(veth-peer)', output)
+        self.assertIn('sent size:  0 option: 14 rapid-commit', output)
+
+        stop_dnsmasq()
 
     def test_dhcp_client_ipv4_only(self):
         copy_network_unit('25-veth.netdev', '25-dhcp-server-veth-peer.network', '25-dhcp-client-ipv4-only.network')

@@ -72,6 +72,14 @@ executables += [
                         threads,
                 ],
         },
+        libexec_template + {
+                'name' : 'systemd-bsod',
+                'public' : true,
+                'conditions' : ['HAVE_QRENCODE'],
+                'sources' : files('bsod.c'),
+                'link_with' : libshared,
+                'dependencies' : libqrencode,
+        },
         executable_template + {
                 'name' : 'systemd-cat',
                 'public' : true,
@@ -94,14 +102,6 @@ executables += [
                         libzstd,
                         threads,
                 ],
-        },
-        executable_template + {
-                'name' : 'systemd-bsod',
-                'conditions' : ['HAVE_QRENCODE'],
-                'public' : true,
-                'sources' : files('bsod.c'),
-                'link_with' : libshared,
-                'dependencies' : libqrencode,
         },
         journal_test_template + {
                 'sources' : files('test-journal-append.c'),
@@ -188,12 +188,12 @@ if get_option('create-log-dirs')
                          install_mode : [ 'rwxr-xr-x', 'root', 'root' ])
         if get_option('adm-group')
                 meson.add_install_script(
-                        'sh', '-c',
+                        sh, '-c',
                         'setfacl -nm g:adm:rx,d:g:adm:rx $DESTDIR/var/log/journal || :')
         endif
         if get_option('wheel-group')
                 meson.add_install_script(
-                        'sh', '-c',
+                        sh, '-c',
                         'setfacl -nm g:wheel:rx,d:g:wheel:rx $DESTDIR/var/log/journal || :')
         endif
 endif

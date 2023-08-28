@@ -25,6 +25,7 @@
 #include "socket-util.h"
 #include "string-util.h"
 #include "strv.h"
+#include "unaligned.h"
 
 int sd_radv_new(sd_radv **ret) {
         _cleanup_(sd_radv_unrefp) sd_radv *ra = NULL;
@@ -99,19 +100,9 @@ static sd_radv *radv_free(sd_radv *ra) {
         if (!ra)
                 return NULL;
 
-        while (ra->prefixes) {
-                sd_radv_prefix *p = ra->prefixes;
-
-                LIST_REMOVE(prefix, ra->prefixes, p);
-                sd_radv_prefix_unref(p);
-        }
-
-        while (ra->route_prefixes) {
-                sd_radv_route_prefix *p = ra->route_prefixes;
-
-                LIST_REMOVE(prefix, ra->route_prefixes, p);
-                sd_radv_route_prefix_unref(p);
-        }
+        LIST_CLEAR(prefix, ra->prefixes, sd_radv_prefix_unref);
+        LIST_CLEAR(prefix, ra->route_prefixes, sd_radv_route_prefix_unref);
+        LIST_CLEAR(prefix, ra->pref64_prefixes, sd_radv_pref64_prefix_unref);
 
         free(ra->rdnss);
         free(ra->dnssl);
@@ -190,6 +181,7 @@ static int radv_send(sd_radv *ra, const struct in6_addr *dst, usec_t lifetime_us
 
         adv.nd_ra_type = ND_ROUTER_ADVERT;
         adv.nd_ra_curhoplimit = ra->hop_limit;
+        adv.nd_ra_retransmit = htobe32(ra->retransmit_msec);
         adv.nd_ra_flags_reserved = ra->flags;
         assert_cc(RADV_MAX_ROUTER_LIFETIME_USEC <= UINT16_MAX * USEC_PER_SEC);
         adv.nd_ra_router_lifetime = htobe16(DIV_ROUND_UP(lifetime_usec, USEC_PER_SEC));
@@ -230,6 +222,9 @@ static int radv_send(sd_radv *ra, const struct in6_addr *dst, usec_t lifetime_us
                 iov[msg.msg_iovlen++] = IOVEC_MAKE(&rt->opt, sizeof(rt->opt));
         }
 
+        LIST_FOREACH(prefix, p, ra->pref64_prefixes)
+                iov[msg.msg_iovlen++] = IOVEC_MAKE(&p->opt, sizeof(p->opt));
+
         if (ra->rdnss)
                 iov[msg.msg_iovlen++] = IOVEC_MAKE(ra->rdnss, ra->rdnss->length * 8);
 
@@ -252,10 +247,9 @@ static int radv_recv(sd_event_source *s, int fd, uint32_t revents, void *userdat
         assert(ra->event);
 
         ssize_t buflen = next_datagram_size_fd(fd);
+        if (ERRNO_IS_NEG_TRANSIENT(buflen) || ERRNO_IS_NEG_DISCONNECT(buflen))
+                return 0;
         if (buflen < 0) {
-                if (ERRNO_IS_TRANSIENT(buflen) || ERRNO_IS_DISCONNECT(buflen))
-                        return 0;
-
                 log_radv_errno(ra, buflen, "Failed to determine datagram size to read, ignoring: %m");
                 return 0;
         }
@@ -265,31 +259,27 @@ static int radv_recv(sd_event_source *s, int fd, uint32_t revents, void *userdat
                 return -ENOMEM;
 
         r = icmp6_receive(fd, buf, buflen, &src, &timestamp);
-        if (r < 0) {
-                if (ERRNO_IS_TRANSIENT(r) || ERRNO_IS_DISCONNECT(r))
-                        return 0;
-
+        if (ERRNO_IS_NEG_TRANSIENT(r) || ERRNO_IS_NEG_DISCONNECT(r))
+                return 0;
+        if (r < 0)
                 switch (r) {
                 case -EADDRNOTAVAIL:
                         log_radv(ra, "Received RS from non-link-local address %s. Ignoring",
                                  IN6_ADDR_TO_STRING(&src));
-                        break;
+                        return 0;
 
                 case -EMULTIHOP:
                         log_radv(ra, "Received RS with invalid hop limit. Ignoring.");
-                        break;
+                        return 0;
 
                 case -EPFNOSUPPORT:
                         log_radv(ra, "Received invalid source address from ICMPv6 socket. Ignoring.");
-                        break;
+                        return 0;
 
                 default:
                         log_radv_errno(ra, r, "Unexpected error receiving from ICMPv6 socket, ignoring: %m");
-                        break;
+                        return 0;
                 }
-
-                return 0;
-        }
 
         if ((size_t) buflen < sizeof(struct nd_router_solicit)) {
                 log_radv(ra, "Too short packet received, ignoring");
@@ -506,6 +496,17 @@ int sd_radv_set_hop_limit(sd_radv *ra, uint8_t hop_limit) {
                 return -EBUSY;
 
         ra->hop_limit = hop_limit;
+
+        return 0;
+}
+
+int sd_radv_set_retransmit(sd_radv *ra, uint32_t retransmit_msec) {
+        assert_return(ra, -EINVAL);
+
+        if (ra->state != RADV_STATE_IDLE)
+                return -EBUSY;
+
+        ra->retransmit_msec = retransmit_msec;
 
         return 0;
 }
@@ -738,6 +739,78 @@ int sd_radv_add_route_prefix(sd_radv *ra, sd_radv_route_prefix *p) {
                                strna(addr_p));
         else
                 log_radv(ra, "Sent Router Advertisement for added route prefix %s.", strna(addr_p));
+
+        return 0;
+}
+
+int sd_radv_add_pref64_prefix(sd_radv *ra, sd_radv_pref64_prefix *p) {
+        sd_radv_pref64_prefix *found = NULL;
+        int r;
+
+        assert_return(ra, -EINVAL);
+        assert_return(p, -EINVAL);
+
+        const char *addr_p = IN6_ADDR_PREFIX_TO_STRING(&p->in6_addr, p->prefixlen);
+
+        LIST_FOREACH(prefix, cur, ra->pref64_prefixes) {
+                r = in_addr_prefix_intersect(AF_INET6,
+                                             (const union in_addr_union*) &cur->in6_addr,
+                                             cur->prefixlen,
+                                             (const union in_addr_union*) &p->in6_addr,
+                                             p->prefixlen);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        continue;
+
+                if (cur->prefixlen == p->prefixlen) {
+                        found = cur;
+                        break;
+                }
+
+                return log_radv_errno(ra, SYNTHETIC_ERRNO(EEXIST),
+                                      "IPv6 PREF64 prefix %s conflicts with %s, ignoring.",
+                                      addr_p,
+                                      IN6_ADDR_PREFIX_TO_STRING(&cur->in6_addr, cur->prefixlen));
+        }
+
+        if (found) {
+                /* p and cur may be equivalent. First increment the reference counter. */
+                sd_radv_pref64_prefix_ref(p);
+
+                /* Then, remove the old entry. */
+                LIST_REMOVE(prefix, ra->pref64_prefixes, found);
+                sd_radv_pref64_prefix_unref(found);
+
+                /* Finally, add the new entry. */
+                LIST_APPEND(prefix, ra->pref64_prefixes, p);
+
+                log_radv(ra, "Updated/replaced IPv6 PREF64 prefix %s (lifetime: %s)",
+                         strna(addr_p),
+                         FORMAT_TIMESPAN(p->lifetime_usec, USEC_PER_SEC));
+        } else {
+                /* The route prefix is new. Let's simply add it. */
+
+                sd_radv_pref64_prefix_ref(p);
+                LIST_APPEND(prefix, ra->pref64_prefixes, p);
+                ra->n_pref64_prefixes++;
+
+                log_radv(ra, "Added PREF64 prefix %s", strna(addr_p));
+        }
+
+        if (ra->state == RADV_STATE_IDLE)
+                return 0;
+
+        if (ra->ra_sent == 0)
+                return 0;
+
+        /* If RAs have already been sent, send an RA immediately to announce the newly-added route prefix */
+        r = radv_send(ra, NULL, ra->lifetime_usec);
+        if (r < 0)
+                log_radv_errno(ra, r, "Unable to send Router Advertisement for added PREF64 prefix %s, ignoring: %m",
+                               strna(addr_p));
+        else
+                log_radv(ra, "Sent Router Advertisement for added PREF64 prefix %s.", strna(addr_p));
 
         return 0;
 }
@@ -984,6 +1057,80 @@ int sd_radv_route_prefix_set_lifetime(sd_radv_route_prefix *p, uint64_t lifetime
 
         p->lifetime_usec = lifetime_usec;
         p->valid_until = valid_until;
+
+        return 0;
+}
+
+int sd_radv_pref64_prefix_new(sd_radv_pref64_prefix **ret) {
+        sd_radv_pref64_prefix *p;
+
+        assert_return(ret, -EINVAL);
+
+        p = new(sd_radv_pref64_prefix, 1);
+        if (!p)
+                return -ENOMEM;
+
+        *p = (sd_radv_pref64_prefix) {
+                .n_ref = 1,
+
+                .opt.type = RADV_OPT_PREF64,
+                .opt.length = 2,
+        };
+
+        *ret = p;
+        return 0;
+}
+
+DEFINE_PUBLIC_TRIVIAL_REF_UNREF_FUNC(sd_radv_pref64_prefix, sd_radv_pref64_prefix, mfree);
+
+int sd_radv_pref64_prefix_set_prefix(
+                sd_radv_pref64_prefix *p,
+                const struct in6_addr *prefix,
+                uint8_t prefixlen,
+                uint64_t lifetime_usec) {
+
+        uint16_t pref64_lifetime;
+        uint8_t prefixlen_code;
+
+        assert_return(p, -EINVAL);
+        assert_return(prefix, -EINVAL);
+
+        switch (prefixlen) {
+        case 96:
+                prefixlen_code = 0;
+                break;
+        case 64:
+                prefixlen_code = 1;
+                break;
+        case 56:
+                prefixlen_code = 2;
+                break;
+        case 48:
+                prefixlen_code = 3;
+                break;
+        case 40:
+                prefixlen_code = 4;
+                break;
+        case 32:
+                prefixlen_code = 5;
+                break;
+        default:
+                log_radv(NULL, "Unsupported PREF64 prefix length %u. Valid lengths are 32, 40, 48, 56, 64 and 96", prefixlen);
+                return -EINVAL;
+        }
+
+        if (lifetime_usec == USEC_INFINITY || DIV_ROUND_UP(lifetime_usec, 8 * USEC_PER_SEC) >= UINT64_C(1) << 13)
+                return -EINVAL;
+
+        /* RFC 8781 - 4.1 rounding up lifetime to multiply of 8 */
+        pref64_lifetime = DIV_ROUND_UP(lifetime_usec, 8 * USEC_PER_SEC) << 3;
+        pref64_lifetime |= prefixlen_code;
+
+        unaligned_write_be16(&p->opt.lifetime_and_plc, pref64_lifetime);
+        memcpy(&p->opt.prefix, prefix, sizeof(p->opt.prefix));
+
+        p->in6_addr = *prefix;
+        p->prefixlen = prefixlen;
 
         return 0;
 }

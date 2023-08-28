@@ -3,49 +3,48 @@
 efi_config_h_dir = meson.current_build_dir()
 efi_addon = ''
 
-if efi_arch != ''
-        libefitest = static_library(
-                'efitest',
-                files(
-                        'bcd.c',
-                        'efi-string.c',
-                ),
-                build_by_default : false,
-                include_directories : [
-                        basic_includes,
-                        include_directories('.'),
-                ],
-                dependencies : userspace)
+libefitest = static_library(
+        'efitest',
+        files(
+                'bcd.c',
+                'efi-string.c',
+        ),
+        build_by_default : false,
+        include_directories : [
+                basic_includes,
+                include_directories('.'),
+        ],
+        dependencies : userspace)
 
-        efitest_base = {
-                'link_with' : [
-                        libefitest,
-                        libshared,
-                ],
-        }
-        efi_test_template = test_template + efitest_base
-        efi_fuzz_template = fuzz_template + efitest_base
+efitest_base = {
+        'link_with' : [
+                libefitest,
+                libshared,
+        ],
+}
+efi_test_template = test_template + efitest_base
+efi_fuzz_template = fuzz_template + efitest_base
 
-        executables += [
-                efi_test_template + {
-                        'sources' : files('test-bcd.c'),
-                        'dependencies' : libzstd,
-                        'conditions' : ['HAVE_ZSTD'],
-                },
-                efi_test_template + {
-                        'sources' : files('test-efi-string.c'),
-                },
-                efi_fuzz_template + {
-                        'sources' : files('fuzz-bcd.c'),
-                },
-                efi_fuzz_template + {
-                        'sources' : files('fuzz-efi-string.c'),
-                },
-                efi_fuzz_template + {
-                        'sources' : files('fuzz-efi-printf.c'),
-                },
-        ]
-endif
+executables += [
+        efi_test_template + {
+                'sources' : files('test-bcd.c'),
+                'dependencies' : libzstd,
+                'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_ZSTD'],
+        },
+        efi_test_template + {
+                'sources' : files('test-efi-string.c'),
+                'conditions' : ['ENABLE_BOOTLOADER'],
+        },
+        efi_fuzz_template + {
+                'sources' : files('fuzz-bcd.c'),
+        },
+        efi_fuzz_template + {
+                'sources' : files('fuzz-efi-string.c'),
+        },
+        efi_fuzz_template + {
+                'sources' : files('fuzz-efi-printf.c'),
+        },
+]
 
 if conf.get('ENABLE_BOOTLOADER') != 1
         subdir_done()
@@ -93,9 +92,11 @@ elif get_option('sbat-distro') != ''
 
         pkgver = get_option('sbat-distro-version')
         if pkgver == ''
-                pkgver = version_tag
+                # This is determined during build, not configuration, so we can't display it yet.
+                efi_conf.set('SBAT_DISTRO_VERSION', 'GIT_VERSION')
+        else
+                efi_conf.set_quoted('SBAT_DISTRO_VERSION', pkgver)
         endif
-        efi_conf.set_quoted('SBAT_DISTRO_VERSION', pkgver)
 endif
 
 summary({'UEFI architectures' : efi_arch + (efi_arch_alt == '' ? '' : ', ' + efi_arch_alt)},
@@ -117,7 +118,11 @@ configure_file(
 
 ############################################################
 
-efi_includes = [fundamental_include, include_directories('.')]
+efi_includes = [
+        build_dir_include,
+        fundamental_include,
+        include_directories('.'),
+]
 
 efi_c_args = [
         '-DSD_BOOT=1',
@@ -299,9 +304,9 @@ foreach archspec : efi_archspecs
                 'efi' + archspec['arch'],
                 fundamental_sources,
                 libefi_sources,
+                version_h,
                 include_directories : efi_includes,
                 c_args : archspec['c_args'],
-                dependencies : versiondep,
                 gnu_symbol_visibility : 'hidden',
                 override_options : efi_override_options,
                 pic : true)
@@ -312,7 +317,6 @@ foreach archspec : efi_archspecs
                 'link_args' : archspec['link_args'],
                 'link_with' : libefi,
                 'link_depends' : elf2efi_lds,
-                'dependencies' : versiondep,
                 'gnu_symbol_visibility' : 'hidden',
                 'override_options' : efi_override_options,
                 'pie' : true,
@@ -320,19 +324,19 @@ foreach archspec : efi_archspecs
 
         efi_elf_binaries += executable(
                 'systemd-boot' + archspec['arch'],
-                sources : systemd_boot_sources,
+                sources : [systemd_boot_sources, version_h],
                 name_suffix : 'elf',
                 kwargs : kwargs)
 
         efi_elf_binaries += executable(
                 'linux' + archspec['arch'],
-                sources : stub_sources,
+                sources : [stub_sources, version_h],
                 name_suffix : 'elf.stub',
                 kwargs : kwargs)
 
         efi_elf_binaries += executable(
                 'addon' + archspec['arch'],
-                sources : addon_sources,
+                sources : [addon_sources, version_h],
                 name_suffix : 'elf.stub',
                 kwargs : kwargs)
 endforeach

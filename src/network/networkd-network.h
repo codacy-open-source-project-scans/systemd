@@ -227,6 +227,8 @@ struct Network {
         RADVPrefixDelegation router_prefix_delegation;
         usec_t router_lifetime_usec;
         uint8_t router_preference;
+        usec_t router_retransmit_usec;
+        uint8_t router_hop_limit;
         bool router_managed;
         bool router_other_information;
         bool router_emit_dns;
@@ -320,6 +322,7 @@ struct Network {
         bool ipv6_accept_ra_use_onlink_prefix;
         bool ipv6_accept_ra_use_mtu;
         bool ipv6_accept_ra_use_hop_limit;
+        bool ipv6_accept_ra_use_icmp6_ratelimit;
         bool ipv6_accept_ra_quickack;
         bool ipv6_accept_ra_use_captive_portal;
         bool active_slave;
@@ -355,6 +358,7 @@ struct Network {
         Hashmap *address_labels_by_section;
         Hashmap *prefixes_by_section;
         Hashmap *route_prefixes_by_section;
+        Hashmap *pref64_prefixes_by_section;
         Hashmap *rules_by_section;
         Hashmap *dhcp_static_leases_by_section;
         Hashmap *qdiscs_by_section;

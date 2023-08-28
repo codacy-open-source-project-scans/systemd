@@ -190,60 +190,70 @@ static int client_ensure_duid(sd_dhcp6_client *client) {
  * without further modification. Otherwise, if duid_type is supported, DUID
  * is set based on that type. Otherwise, an error is returned.
  */
-static int dhcp6_client_set_duid_internal(
-                sd_dhcp6_client *client,
-                DUIDType duid_type,
-                const void *duid,
-                size_t duid_len,
-                usec_t llt_time) {
+int sd_dhcp6_client_set_duid_llt(sd_dhcp6_client *client, uint64_t llt_time) {
         int r;
 
         assert_return(client, -EINVAL);
         assert_return(!sd_dhcp6_client_is_running(client), -EBUSY);
-        assert_return(duid_len == 0 || duid, -EINVAL);
 
-        if (duid) {
-                r = dhcp_validate_duid_len(duid_type, duid_len, true);
-                if (r < 0) {
-                        r = dhcp_validate_duid_len(duid_type, duid_len, false);
-                        if (r < 0)
-                                return log_dhcp6_client_errno(client, r, "Failed to validate length of DUID: %m");
-
-                        log_dhcp6_client(client, "Using DUID of type %i of incorrect length, proceeding.", duid_type);
-                }
-
-                client->duid.type = htobe16(duid_type);
-                memcpy(&client->duid.raw.data, duid, duid_len);
-                client->duid_len = sizeof(client->duid.type) + duid_len;
-
-        } else {
-                r = dhcp_identifier_set_duid(duid_type, &client->hw_addr, client->arp_type, llt_time,
-                                             client->test_mode, &client->duid, &client->duid_len);
-                if (r == -EOPNOTSUPP)
-                        return log_dhcp6_client_errno(client, r,
-                                                      "Failed to set %s. MAC address is not set or "
-                                                      "interface type is not supported.",
-                                                      duid_type_to_string(duid_type));
-                if (r < 0)
-                        return log_dhcp6_client_errno(client, r, "Failed to set %s: %m",
-                                                      duid_type_to_string(duid_type));
-        }
+        r = dhcp_identifier_set_duid_llt(&client->hw_addr, client->arp_type, llt_time, &client->duid, &client->duid_len);
+        if (r < 0)
+                return log_dhcp6_client_errno(client, r, "Failed to set DUID-LLT: %m");
 
         return 0;
 }
 
-int sd_dhcp6_client_set_duid(
-                sd_dhcp6_client *client,
-                uint16_t duid_type,
-                const void *duid,
-                size_t duid_len) {
-        return dhcp6_client_set_duid_internal(client, duid_type, duid, duid_len, 0);
+int sd_dhcp6_client_set_duid_ll(sd_dhcp6_client *client) {
+        int r;
+
+        assert_return(client, -EINVAL);
+        assert_return(!sd_dhcp6_client_is_running(client), -EBUSY);
+
+        r = dhcp_identifier_set_duid_ll(&client->hw_addr, client->arp_type, &client->duid, &client->duid_len);
+        if (r < 0)
+                return log_dhcp6_client_errno(client, r, "Failed to set DUID-LL: %m");
+
+        return 0;
 }
 
-int sd_dhcp6_client_set_duid_llt(
-                sd_dhcp6_client *client,
-                usec_t llt_time) {
-        return dhcp6_client_set_duid_internal(client, DUID_TYPE_LLT, NULL, 0, llt_time);
+int sd_dhcp6_client_set_duid_en(sd_dhcp6_client *client) {
+        int r;
+
+        assert_return(client, -EINVAL);
+        assert_return(!sd_dhcp6_client_is_running(client), -EBUSY);
+
+        r = dhcp_identifier_set_duid_en(client->test_mode, &client->duid, &client->duid_len);
+        if (r < 0)
+                return log_dhcp6_client_errno(client, r, "Failed to set DUID-EN: %m");
+
+        return 0;
+}
+
+int sd_dhcp6_client_set_duid_uuid(sd_dhcp6_client *client) {
+        int r;
+
+        assert_return(client, -EINVAL);
+        assert_return(!sd_dhcp6_client_is_running(client), -EBUSY);
+
+        r = dhcp_identifier_set_duid_uuid(&client->duid, &client->duid_len);
+        if (r < 0)
+                return log_dhcp6_client_errno(client, r, "Failed to set DUID-UUID: %m");
+
+        return 0;
+}
+
+int sd_dhcp6_client_set_duid_raw(sd_dhcp6_client *client, uint16_t duid_type, const uint8_t *duid, size_t duid_len) {
+        int r;
+
+        assert_return(client, -EINVAL);
+        assert_return(!sd_dhcp6_client_is_running(client), -EBUSY);
+        assert_return(duid || duid_len == 0, -EINVAL);
+
+        r = dhcp_identifier_set_duid_raw(duid_type, duid, duid_len, &client->duid, &client->duid_len);
+        if (r < 0)
+                return log_dhcp6_client_errno(client, r, "Failed to set DUID: %m");
+
+        return 0;
 }
 
 int sd_dhcp6_client_duid_as_string(
@@ -1283,10 +1293,9 @@ static int client_receive_message(
         ssize_t buflen, len;
 
         buflen = next_datagram_size_fd(fd);
+        if (ERRNO_IS_NEG_TRANSIENT(buflen) || ERRNO_IS_NEG_DISCONNECT(buflen))
+                return 0;
         if (buflen < 0) {
-                if (ERRNO_IS_TRANSIENT(buflen) || ERRNO_IS_DISCONNECT(buflen))
-                        return 0;
-
                 log_dhcp6_client_errno(client, buflen, "Failed to determine datagram size to read, ignoring: %m");
                 return 0;
         }
@@ -1298,10 +1307,9 @@ static int client_receive_message(
         iov = IOVEC_MAKE(message, buflen);
 
         len = recvmsg_safe(fd, &msg, MSG_DONTWAIT);
+        if (ERRNO_IS_NEG_TRANSIENT(len) || ERRNO_IS_NEG_DISCONNECT(len))
+                return 0;
         if (len < 0) {
-                if (ERRNO_IS_TRANSIENT(len) || ERRNO_IS_DISCONNECT(len))
-                        return 0;
-
                 log_dhcp6_client_errno(client, len, "Could not receive message from UDP socket, ignoring: %m");
                 return 0;
         }

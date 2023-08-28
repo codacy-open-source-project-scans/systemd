@@ -74,7 +74,8 @@ typedef enum MountMode {
         EXTENSION_DIRECTORIES, /* Bind-mounted outside the root directory, and used by subsequent mounts */
         EXTENSION_IMAGES, /* Mounted outside the root directory, and used by subsequent mounts */
         MQUEUEFS,
-        READWRITE_IMPLICIT, /* Should have the lowest priority. */
+        READWRITE_IMPLICIT, /* Should have the 2nd lowest priority. */
+        MKDIR,              /* Should have the lowest priority. */
         _MOUNT_MODE_MAX,
 } MountMode;
 
@@ -208,25 +209,30 @@ static const MountEntry protect_system_strict_table[] = {
 };
 
 static const char * const mount_mode_table[_MOUNT_MODE_MAX] = {
-        [INACCESSIBLE]         = "inaccessible",
-        [OVERLAY_MOUNT]        = "overlay",
-        [BIND_MOUNT]           = "bind",
-        [BIND_MOUNT_RECURSIVE] = "rbind",
-        [PRIVATE_TMP]          = "private-tmp",
-        [PRIVATE_DEV]          = "private-dev",
-        [BIND_DEV]             = "bind-dev",
-        [EMPTY_DIR]            = "empty",
-        [PRIVATE_SYSFS]        = "private-sysfs",
-        [BIND_SYSFS]           = "bind-sysfs",
-        [PROCFS]               = "procfs",
-        [READONLY]             = "read-only",
-        [READWRITE]            = "read-write",
-        [TMPFS]                = "tmpfs",
-        [MOUNT_IMAGES]         = "mount-images",
-        [READWRITE_IMPLICIT]   = "rw-implicit",
-        [EXEC]                 = "exec",
-        [NOEXEC]               = "noexec",
-        [MQUEUEFS]             = "mqueuefs",
+        [INACCESSIBLE]          = "inaccessible",
+        [OVERLAY_MOUNT]         = "overlay",
+        [MOUNT_IMAGES]          = "mount-images",
+        [BIND_MOUNT]            = "bind",
+        [BIND_MOUNT_RECURSIVE]  = "rbind",
+        [PRIVATE_TMP]           = "private-tmp",
+        [PRIVATE_TMP_READONLY]  = "private-tmp-read-only",
+        [PRIVATE_DEV]           = "private-dev",
+        [BIND_DEV]              = "bind-dev",
+        [EMPTY_DIR]             = "empty",
+        [PRIVATE_SYSFS]         = "private-sysfs",
+        [BIND_SYSFS]            = "bind-sysfs",
+        [PROCFS]                = "procfs",
+        [READONLY]              = "read-only",
+        [READWRITE]             = "read-write",
+        [NOEXEC]                = "noexec",
+        [EXEC]                  = "exec",
+        [TMPFS]                 = "tmpfs",
+        [RUN]                   = "run",
+        [EXTENSION_DIRECTORIES] = "extension-directories",
+        [EXTENSION_IMAGES]      = "extension-images",
+        [MQUEUEFS]              = "mqueuefs",
+        [READWRITE_IMPLICIT]    = "read-write-implicit",
+        [MKDIR]                 = "mkdir",
 };
 
 /* Helper struct for naming simplicity and reusability */
@@ -1045,34 +1051,7 @@ static int mount_bind_dev(const MountEntry *m) {
         if (r > 0) /* make this a NOP if /dev is already a mount point */
                 return 0;
 
-        r = mount_nofollow_verbose(LOG_DEBUG, "/dev", mount_entry_path(m), NULL, MS_BIND|MS_REC, NULL);
-        if (r < 0)
-                return r;
-
-        return 1;
-}
-
-static int mount_private_sysfs(const MountEntry *m) {
-        const char *p = mount_entry_path(ASSERT_PTR(m));
-        int r;
-
-        (void) mkdir_p_label(p, 0755);
-
-        r = remount_sysfs(p);
-        if (r < 0 && (ERRNO_IS_PRIVILEGE(r) || ERRNO_IS_NOT_SUPPORTED(r))) {
-                /* Running with an unprivileged user (PrivateUsers=yes), or the kernel seems old. Falling
-                 * back to bind mount the host's version so that we get all child mounts of it, too. */
-
-                log_debug_errno(r, "Failed to remount sysfs on %s, falling back to bind mount: %m", p);
-
-                (void) umount_recursive(p, 0);
-
-                r = mount_nofollow_verbose(LOG_DEBUG, "/sys", p, NULL, MS_BIND|MS_REC, NULL);
-        }
-        if (r < 0)
-                return log_debug_errno(r, "Failed to remount sysfs on %s: %m", p);
-
-        return 1;
+        return mount_nofollow_verbose(LOG_DEBUG, "/dev", mount_entry_path(m), NULL, MS_BIND|MS_REC, NULL);
 }
 
 static int mount_bind_sysfs(const MountEntry *m) {
@@ -1089,11 +1068,34 @@ static int mount_bind_sysfs(const MountEntry *m) {
                 return 0;
 
         /* Bind mount the host's version so that we get all child mounts of it, too. */
-        r = mount_nofollow_verbose(LOG_DEBUG, "/sys", mount_entry_path(m), NULL, MS_BIND|MS_REC, NULL);
-        if (r < 0)
+        return mount_nofollow_verbose(LOG_DEBUG, "/sys", mount_entry_path(m), NULL, MS_BIND|MS_REC, NULL);
+}
+
+static int mount_private_sysfs(const MountEntry *m) {
+        const char *entry_path = mount_entry_path(ASSERT_PTR(m));
+        int r, n;
+
+        (void) mkdir_p_label(entry_path, 0755);
+
+        n = umount_recursive(entry_path, 0);
+
+        r = mount_nofollow_verbose(LOG_DEBUG, "sysfs", entry_path, "sysfs", MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL);
+        if (ERRNO_IS_NEG_PRIVILEGE(r)) {
+                /* When we do not have enough privileges to mount sysfs, fall back to use existing /sys. */
+
+                if (n > 0)
+                        /* /sys or some of sub-mounts are umounted in the above. Refuse incomplete tree.
+                         * Propagate the original error code returned by mount() in the above. */
+                        return r;
+
+                return mount_bind_sysfs(m);
+
+        } else if (r < 0)
                 return r;
 
-        return 1;
+        /* We mounted a new instance now. Let's bind mount the children over now. */
+        (void) bind_mount_submounts("/sys", entry_path);
+        return 0;
 }
 
 static int mount_procfs(const MountEntry *m, const NamespaceInfo *ns_info) {
@@ -1152,34 +1154,32 @@ static int mount_procfs(const MountEntry *m, const NamespaceInfo *ns_info) {
                  * means we really don't want to use it, since it would affect our host's /proc
                  * mount. Hence let's gracefully fallback to a classic, unrestricted version. */
                 r = mount_nofollow_verbose(LOG_DEBUG, "proc", entry_path, "proc", MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL);
-        if (r == -EPERM) {
-                /* When we do not have enough privileges to mount /proc, fallback to use existing /proc. */
+        if (ERRNO_IS_NEG_PRIVILEGE(r)) {
+                /* When we do not have enough privileges to mount /proc, fall back to use existing /proc. */
 
                 if (n > 0)
                         /* /proc or some of sub-mounts are umounted in the above. Refuse incomplete tree.
                          * Propagate the original error code returned by mount() in the above. */
-                        return -EPERM;
+                        return r;
 
                 r = path_is_mount_point(entry_path, NULL, 0);
                 if (r < 0)
                         return log_debug_errno(r, "Unable to determine whether /proc is already mounted: %m");
-                if (r == 0) {
-                        /* We lack permissions to mount a new instance of /proc, and it is not already
-                         * mounted. But we can access the host's, so as a final fallback bind-mount it to
-                         * the destination, as most likely we are inside a user manager in an unprivileged
-                         * user namespace. */
-                        r = mount_nofollow_verbose(LOG_DEBUG, "/proc", entry_path, NULL, MS_BIND|MS_REC, NULL);
-                        if (r < 0)
-                                return -EPERM;
-                }
+                if (r > 0)
+                        return 0;
+
+                /* We lack permissions to mount a new instance of /proc, and it is not already mounted. But
+                 * we can access the host's, so as a final fallback bind-mount it to the destination, as most
+                 * likely we are inside a user manager in an unprivileged user namespace. */
+                return mount_nofollow_verbose(LOG_DEBUG, "/proc", entry_path, NULL, MS_BIND|MS_REC, NULL);
+
         } else if (r < 0)
                 return r;
-        else
-                /* We mounted a new instance now. Let's bind mount the children over now. This matters for
-                 * nspawn where a bunch of files are overmounted, in particular the boot id */
-                (void) bind_mount_submounts("/proc", entry_path);
 
-        return 1;
+        /* We mounted a new instance now. Let's bind mount the children over now. This matters for nspawn
+         * where a bunch of files are overmounted, in particular the boot id */
+        (void) bind_mount_submounts("/proc", entry_path);
+        return 0;
 }
 
 static int mount_tmpfs(const MountEntry *m) {
@@ -1205,7 +1205,7 @@ static int mount_tmpfs(const MountEntry *m) {
         if (r < 0)
                 return log_debug_errno(r, "Failed to fix label of '%s' as '%s': %m", entry_path, inner_path);
 
-        return 1;
+        return 0;
 }
 
 static int mount_run(const MountEntry *m) {
@@ -1303,7 +1303,7 @@ static int mount_image(
         if (r < 0)
                 return log_debug_errno(r, "Failed to mount image %s on %s: %m", mount_entry_source(m), mount_entry_path(m));
 
-        return 1;
+        return 0;
 }
 
 static int mount_overlay(const MountEntry *m) {
@@ -1319,10 +1319,8 @@ static int mount_overlay(const MountEntry *m) {
         r = mount_nofollow_verbose(LOG_DEBUG, "overlay", mount_entry_path(m), "overlay", MS_RDONLY, options);
         if (r == -ENOENT && m->ignore)
                 return 0;
-        if (r < 0)
-                return r;
 
-        return 1;
+        return r;
 }
 
 static int follow_symlink(
@@ -1550,6 +1548,12 @@ static int apply_one_mount(
 
         case OVERLAY_MOUNT:
                 return mount_overlay(m);
+
+        case MKDIR:
+                r = mkdir_p_label(mount_entry_path(m), 0755);
+                if (r < 0)
+                        return r;
+                return 1;
 
         default:
                 assert_not_reached();
@@ -1823,7 +1827,7 @@ static int apply_mounts(
                 const NamespaceInfo *ns_info,
                 MountEntry *mounts,
                 size_t *n_mounts,
-                char **exec_dir_symlinks,
+                char **symlinks,
                 char **error_path) {
 
         _cleanup_fclose_ FILE *proc_self_mountinfo = NULL;
@@ -1891,12 +1895,12 @@ static int apply_mounts(
         }
 
         /* Now that all filesystems have been set up, but before the
-         * read-only switches are flipped, create the exec dirs symlinks.
+         * read-only switches are flipped, create the exec dirs and other symlinks.
          * Note that when /var/lib is not empty/tmpfs, these symlinks will already
          * exist, which means this will be a no-op. */
-        r = create_symlinks_from_tuples(root, exec_dir_symlinks);
+        r = create_symlinks_from_tuples(root, symlinks);
         if (r < 0)
-                return log_debug_errno(r, "Failed to set up ExecDirectories symlinks inside mount namespace: %m");
+                return log_debug_errno(r, "Failed to set up symlinks inside mount namespace: %m");
 
         /* Create a deny list we can pass to bind_mount_recursive() */
         deny_list = new(char*, (*n_mounts)+1);
@@ -2006,7 +2010,7 @@ int setup_namespace(
                 char** exec_paths,
                 char** no_exec_paths,
                 char** empty_directories,
-                char** exec_dir_symlinks,
+                char** symlinks,
                 const BindMount *bind_mounts,
                 size_t n_bind_mounts,
                 const TemporaryFileSystem *temporary_filesystems,
@@ -2017,6 +2021,7 @@ int setup_namespace(
                 const char* tmp_dir,
                 const char* var_tmp_dir,
                 const char *creds_path,
+                int creds_fd,
                 const char *log_namespace,
                 unsigned long mount_propagation_flag,
                 VeritySettings *verity,
@@ -2028,7 +2033,7 @@ int setup_namespace(
                 const char *incoming_dir,
                 const char *extension_dir,
                 const char *notify_socket,
-                const char *host_os_release,
+                const char *host_os_release_stage,
                 char **error_path) {
 
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
@@ -2156,7 +2161,7 @@ int setup_namespace(
                         log_namespace,
                         setup_propagate,
                         notify_socket,
-                        host_os_release);
+                        host_os_release_stage);
 
         if (n_mounts > 0) {
                 m = mounts = new0(MountEntry, n_mounts);
@@ -2339,13 +2344,22 @@ int setup_namespace(
                                 .flags = MS_NODEV|MS_STRICTATIME|MS_NOSUID|MS_NOEXEC,
                         };
 
-                        *(m++) = (MountEntry) {
-                                .path_const = creds_path,
-                                .mode = BIND_MOUNT,
-                                .read_only = true,
-                                .source_const = creds_path,
-                                .ignore = true,
-                        };
+                        /* If we have mount fd for credentials directory, then it will be mounted after
+                         * namespace is set up. So, here we only create the mount point. */
+
+                        if (creds_fd < 0)
+                                *(m++) = (MountEntry) {
+                                        .path_const = creds_path,
+                                        .mode = BIND_MOUNT,
+                                        .read_only = true,
+                                        .source_const = creds_path,
+                                        .ignore = true,
+                                };
+                        else
+                                *(m++) = (MountEntry) {
+                                        .path_const = creds_path,
+                                        .mode = MKDIR,
+                                };
                 } else {
                         /* If our service has no credentials store configured, then make the whole
                          * credentials tree inaccessible wholesale. */
@@ -2391,10 +2405,10 @@ int setup_namespace(
                                 .read_only = true,
                         };
 
-                if (host_os_release)
+                if (host_os_release_stage)
                         *(m++) = (MountEntry) {
-                                .path_const = "/run/host/os-release",
-                                .source_const = host_os_release,
+                                .path_const = "/run/host/.os-release-stage/",
+                                .source_const = host_os_release_stage,
                                 .mode = BIND_MOUNT,
                                 .read_only = true,
                                 .ignore = true, /* Live copy, don't hard-fail if it goes missing */
@@ -2489,7 +2503,7 @@ int setup_namespace(
                 (void) base_filesystem_create(root, UID_INVALID, GID_INVALID);
 
         /* Now make the magic happen */
-        r = apply_mounts(root, mount_image_policy, extension_image_policy, ns_info, mounts, &n_mounts, exec_dir_symlinks, error_path);
+        r = apply_mounts(root, mount_image_policy, extension_image_policy, ns_info, mounts, &n_mounts, symlinks, error_path);
         if (r < 0)
                 goto finish;
 

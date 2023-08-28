@@ -40,7 +40,7 @@
 #include "random-util.h"
 #include "string-table.h"
 #include "strv.h"
-#include "tpm-pcr.h"
+#include "tpm2-pcr.h"
 #include "tpm2-util.h"
 
 /* internal helper */
@@ -434,7 +434,7 @@ static int parse_one_option(const char *option) {
                                 return 0;
                         }
 
-                        pcr = r ? TPM_PCR_INDEX_VOLUME_KEY : UINT_MAX;
+                        pcr = r ? TPM2_PCR_SYSTEM_IDENTITY : UINT_MAX;
                 } else if (!TPM2_PCR_INDEX_VALID(pcr)) {
                         log_warning("Selected TPM index for measurement %u outside of allowed range 0…%u, ignoring.", pcr, TPM2_PCRS_MAX-1);
                         return 0;
@@ -1728,11 +1728,12 @@ static int attach_luks_or_plain_or_bitlk_by_tpm2(
                                                               found_some
                                                               ? "No TPM2 metadata matching the current system state found in LUKS2 header, falling back to traditional unlocking."
                                                               : "No TPM2 metadata enrolled in LUKS2 header, falling back to traditional unlocking.");
-                                if (r < 0) {
-                                        if (ERRNO_IS_NOT_SUPPORTED(r))  /* TPM2 support not compiled in? */
-                                                return log_debug_errno(SYNTHETIC_ERRNO(EAGAIN), "TPM2 support not available, falling back to traditional unlocking.");
+                                if (ERRNO_IS_NEG_NOT_SUPPORTED(r))
+                                        /* TPM2 support not compiled in? */
+                                        return log_debug_errno(SYNTHETIC_ERRNO(EAGAIN),
+                                                               "TPM2 support not available, falling back to traditional unlocking.");
+                                if (r < 0)
                                         return r;
-                                }
 
                                 found_some = true;
 

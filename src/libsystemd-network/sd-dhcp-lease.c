@@ -345,13 +345,11 @@ int sd_dhcp_lease_get_vendor_specific(sd_dhcp_lease *lease, const void **data, s
 }
 
 static sd_dhcp_lease *dhcp_lease_free(sd_dhcp_lease *lease) {
+        struct sd_dhcp_raw_option *option;
+
         assert(lease);
 
-        while (lease->private_options) {
-                struct sd_dhcp_raw_option *option = lease->private_options;
-
-                LIST_REMOVE(options, lease->private_options, option);
-
+        while ((option = LIST_POP(options, lease->private_options))) {
                 free(option->data);
                 free(option);
         }
@@ -1161,8 +1159,7 @@ static char **private_options_free(char **options) {
         if (!options)
                 return NULL;
 
-        for (unsigned i = 0; i < SD_DHCP_OPTION_PRIVATE_LAST - SD_DHCP_OPTION_PRIVATE_BASE + 1; i++)
-                free(options[i]);
+        free_many_charp(options, SD_DHCP_OPTION_PRIVATE_LAST - SD_DHCP_OPTION_PRIVATE_BASE + 1);
 
         return mfree(options);
 }

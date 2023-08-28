@@ -1257,10 +1257,8 @@ static unsigned manager_dispatch_release_resources_queue(Manager *m) {
 
         assert(m);
 
-        while ((u = m->release_resources_queue)) {
+        while ((u = LIST_POP(release_resources_queue, m->release_resources_queue))) {
                 assert(u->in_release_resources_queue);
-
-                LIST_REMOVE(release_resources_queue, m->release_resources_queue, u);
                 u->in_release_resources_queue = false;
 
                 n++;
@@ -1364,12 +1362,11 @@ static unsigned manager_dispatch_gc_unit_queue(Manager *m) {
 
         gc_marker = m->gc_marker;
 
-        while ((u = m->gc_unit_queue)) {
+        while ((u = LIST_POP(gc_queue, m->gc_unit_queue))) {
                 assert(u->in_gc_queue);
 
                 unit_gc_sweep(u, gc_marker);
 
-                LIST_REMOVE(gc_queue, m->gc_unit_queue, u);
                 u->in_gc_queue = false;
 
                 n++;
@@ -1392,10 +1389,8 @@ static unsigned manager_dispatch_gc_job_queue(Manager *m) {
 
         assert(m);
 
-        while ((j = m->gc_job_queue)) {
+        while ((j = LIST_POP(gc_queue, m->gc_job_queue))) {
                 assert(j->in_gc_queue);
-
-                LIST_REMOVE(gc_queue, m->gc_job_queue, j);
                 j->in_gc_queue = false;
 
                 n++;
@@ -1459,11 +1454,10 @@ static unsigned manager_dispatch_stop_when_unneeded_queue(Manager *m) {
 
         assert(m);
 
-        while ((u = m->stop_when_unneeded_queue)) {
+        while ((u = LIST_POP(stop_when_unneeded_queue, m->stop_when_unneeded_queue))) {
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
 
                 assert(u->in_stop_when_unneeded_queue);
-                LIST_REMOVE(stop_when_unneeded_queue, m->stop_when_unneeded_queue, u);
                 u->in_stop_when_unneeded_queue = false;
 
                 n++;
@@ -1500,12 +1494,11 @@ static unsigned manager_dispatch_start_when_upheld_queue(Manager *m) {
 
         assert(m);
 
-        while ((u = m->start_when_upheld_queue)) {
+        while ((u = LIST_POP(start_when_upheld_queue, m->start_when_upheld_queue))) {
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
                 Unit *culprit = NULL;
 
                 assert(u->in_start_when_upheld_queue);
-                LIST_REMOVE(start_when_upheld_queue, m->start_when_upheld_queue, u);
                 u->in_start_when_upheld_queue = false;
 
                 n++;
@@ -1542,12 +1535,11 @@ static unsigned manager_dispatch_stop_when_bound_queue(Manager *m) {
 
         assert(m);
 
-        while ((u = m->stop_when_bound_queue)) {
+        while ((u = LIST_POP(stop_when_bound_queue, m->stop_when_bound_queue))) {
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
                 Unit *culprit = NULL;
 
                 assert(u->in_stop_when_bound_queue);
-                LIST_REMOVE(stop_when_bound_queue, m->stop_when_bound_queue, u);
                 u->in_stop_when_bound_queue = false;
 
                 n++;
@@ -2177,13 +2169,12 @@ static int manager_dispatch_target_deps_queue(Manager *m) {
 
         assert(m);
 
-        while ((u = m->target_deps_queue)) {
+        while ((u = LIST_POP(target_deps_queue, m->target_deps_queue))) {
                 _cleanup_free_ Unit **targets = NULL;
                 int n_targets;
 
                 assert(u->in_target_deps_queue);
 
-                LIST_REMOVE(target_deps_queue, u->manager->target_deps_queue, u);
                 u->in_target_deps_queue = false;
 
                 /* Take an "atomic" snapshot of dependencies here, as the call below will likely modify the
@@ -2620,21 +2611,20 @@ static int manager_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t 
         }
 
         n = recvmsg_safe(m->notify_fd, &msghdr, MSG_DONTWAIT|MSG_CMSG_CLOEXEC|MSG_TRUNC);
-        if (n < 0) {
-                if (ERRNO_IS_TRANSIENT(n))
-                        return 0; /* Spurious wakeup, try again */
-                if (n == -EXFULL) {
-                        log_warning("Got message with truncated control data (too many fds sent?), ignoring.");
-                        return 0;
-                }
-                /* If this is any other, real error, then let's stop processing this socket. This of course
-                 * means we won't take notification messages anymore, but that's still better than busy
-                 * looping around this: being woken up over and over again but being unable to actually read
-                 * the message off the socket. */
-                return log_error_errno(n, "Failed to receive notification message: %m");
+        if (ERRNO_IS_NEG_TRANSIENT(n))
+                return 0; /* Spurious wakeup, try again */
+        if (n == -EXFULL) {
+                log_warning("Got message with truncated control data (too many fds sent?), ignoring.");
+                return 0;
         }
+        if (n < 0)
+                /* If this is any other, real error, then stop processing this socket. This of course means
+                 * we won't take notification messages anymore, but that's still better than busy looping:
+                 * being woken up over and over again, but being unable to actually read the message from the
+                 * socket. */
+                return log_error_errno(n, "Failed to receive notification message: %m");
 
-        CMSG_FOREACH(cmsg, &msghdr) {
+        CMSG_FOREACH(cmsg, &msghdr)
                 if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
 
                         assert(!fd_array);
@@ -2648,7 +2638,6 @@ static int manager_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t 
                         assert(!ucred);
                         ucred = CMSG_TYPED_DATA(cmsg, struct ucred);
                 }
-        }
 
         if (n_fds > 0) {
                 assert(fd_array);
@@ -4719,11 +4708,10 @@ static int short_uid_range(const char *path) {
          * i.e. from root to nobody. */
 
         r = uid_range_load_userns(&p, path);
-        if (r < 0) {
-                if (ERRNO_IS_NOT_SUPPORTED(r))
-                        return false;
+        if (ERRNO_IS_NEG_NOT_SUPPORTED(r))
+                return false;
+        if (r < 0)
                 return log_debug_errno(r, "Failed to load %s: %m", path);
-        }
 
         return !uid_range_covers(p, 0, 65535);
 }

@@ -68,9 +68,9 @@
 #include "string-util.h"
 #include "strv.h"
 #include "sync-util.h"
-#include "tmpfile-util.h"
 #include "terminal-util.h"
-#include "tpm-pcr.h"
+#include "tmpfile-util.h"
+#include "tpm2-pcr.h"
 #include "tpm2-util.h"
 #include "user-util.h"
 #include "utf8.h"
@@ -1477,7 +1477,7 @@ static int config_parse_exclude_files(
                 return 0;
         }
 
-        r = path_simplify_and_warn(resolved, PATH_CHECK_ABSOLUTE, unit, filename, line, lvalue);
+        r = path_simplify_and_warn(resolved, PATH_CHECK_ABSOLUTE|PATH_KEEP_TRAILING_SLASH, unit, filename, line, lvalue);
         if (r < 0)
                 return 0;
 
@@ -1733,11 +1733,20 @@ static int partition_read_definition(Partition *p, const char *path, const char 
                 return log_syntax(NULL, LOG_ERR, path, 1, SYNTHETIC_ERRNO(EINVAL),
                                   "Format=swap and CopyFiles= cannot be combined, refusing.");
 
-        if (!p->format && (!strv_isempty(p->copy_files) || !strv_isempty(p->make_directories) || (p->encrypt != ENCRYPT_OFF && !(p->copy_blocks_path || p->copy_blocks_auto)))) {
-                /* Pick "vfat" as file system for esp and xbootldr partitions, otherwise default to "ext4". */
-                p->format = strdup(IN_SET(p->type.designator, PARTITION_ESP, PARTITION_XBOOTLDR) ? "vfat" : "ext4");
-                if (!p->format)
-                        return log_oom();
+        if (!p->format) {
+                const char *format = NULL;
+
+                if (!strv_isempty(p->copy_files) || !strv_isempty(p->make_directories) || (p->encrypt != ENCRYPT_OFF && !(p->copy_blocks_path || p->copy_blocks_auto)))
+                        /* Pick "vfat" as file system for esp and xbootldr partitions, otherwise default to "ext4". */
+                        format = IN_SET(p->type.designator, PARTITION_ESP, PARTITION_XBOOTLDR) ? "vfat" : "ext4";
+                else if (p->type.designator == PARTITION_SWAP)
+                        format = "swap";
+
+                if (format) {
+                        p->format = strdup(format);
+                        if (!p->format)
+                                return log_oom();
+                }
         }
 
         if (p->minimize != MINIMIZE_OFF && !p->format && p->verity != VERITY_HASH)
@@ -2707,7 +2716,7 @@ static int context_dump_partitions(Context *context) {
         _cleanup_(table_unrefp) Table *t = NULL;
         uint64_t sum_padding = 0, sum_size = 0;
         int r;
-        const size_t roothash_col = 13, dropin_files_col = 14, split_path_col = 15;
+        const size_t roothash_col = 14, dropin_files_col = 15, split_path_col = 16;
         bool has_roothash = false, has_dropin_files = false, has_split_path = false;
 
         if ((arg_json_format_flags & JSON_FORMAT_OFF) && context->n_partitions == 0) {
@@ -2718,6 +2727,7 @@ static int context_dump_partitions(Context *context) {
         t = table_new("type",
                       "label",
                       "uuid",
+                      "partno",
                       "file",
                       "node",
                       "offset",
@@ -2737,12 +2747,12 @@ static int context_dump_partitions(Context *context) {
         if (!DEBUG_LOGGING) {
                 if (arg_json_format_flags & JSON_FORMAT_OFF)
                         (void) table_set_display(t, (size_t) 0, (size_t) 1, (size_t) 2, (size_t) 3, (size_t) 4,
-                                                    (size_t) 8, (size_t) 11, roothash_col, dropin_files_col,
+                                                    (size_t) 8, (size_t) 9, (size_t) 12, roothash_col, dropin_files_col,
                                                     split_path_col);
                 else
                         (void) table_set_display(t, (size_t) 0, (size_t) 1, (size_t) 2, (size_t) 3, (size_t) 4,
-                                                    (size_t) 5, (size_t) 6, (size_t) 7, (size_t) 9, (size_t) 10,
-                                                    (size_t) 12, roothash_col, dropin_files_col,
+                                                    (size_t) 5, (size_t) 6, (size_t) 7, (size_t) 8, (size_t) 10,
+                                                    (size_t) 11, (size_t) 13, roothash_col, dropin_files_col,
                                                     split_path_col);
         }
 
@@ -2796,6 +2806,7 @@ static int context_dump_partitions(Context *context) {
                                 TABLE_STRING, gpt_partition_type_uuid_to_string_harder(p->type.uuid, uuid_buffer),
                                 TABLE_STRING, empty_to_null(label) ?: "-", TABLE_SET_COLOR, empty_to_null(label) ? NULL : ansi_grey(),
                                 TABLE_UUID, p->new_uuid_is_set ? p->new_uuid : p->current_uuid,
+                                TABLE_UINT64, p->partno,
                                 TABLE_PATH_BASENAME, p->definition_path, TABLE_SET_COLOR, p->definition_path ? NULL : ansi_grey(),
                                 TABLE_STRING, partname ?: "-", TABLE_SET_COLOR, partname ? NULL : ansi_highlight(),
                                 TABLE_UINT64, p->offset,
@@ -2825,6 +2836,7 @@ static int context_dump_partitions(Context *context) {
 
                 r = table_add_many(
                                 t,
+                                TABLE_EMPTY,
                                 TABLE_EMPTY,
                                 TABLE_EMPTY,
                                 TABLE_EMPTY,
@@ -6825,7 +6837,7 @@ static int parse_argv(int argc, char *argv[]) {
                                        "A path to a loopback file must be specified when --split is used.");
 
         if (arg_tpm2_public_key_pcr_mask_use_default && arg_tpm2_public_key)
-                arg_tpm2_public_key_pcr_mask = INDEX_TO_MASK(uint32_t, TPM_PCR_INDEX_KERNEL_IMAGE);
+                arg_tpm2_public_key_pcr_mask = INDEX_TO_MASK(uint32_t, TPM2_PCR_KERNEL_BOOT);
 
         if (arg_tpm2_hash_pcr_values_use_default && !GREEDY_REALLOC_APPEND(
                         arg_tpm2_hash_pcr_values,

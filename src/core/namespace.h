@@ -111,7 +111,7 @@ int setup_namespace(
                 char **exec_paths,
                 char **no_exec_paths,
                 char **empty_directories,
-                char **exec_dir_symlinks,
+                char **symlinks,
                 const BindMount *bind_mounts,
                 size_t n_bind_mounts,
                 const TemporaryFileSystem *temporary_filesystems,
@@ -122,6 +122,7 @@ int setup_namespace(
                 const char *tmp_dir,
                 const char *var_tmp_dir,
                 const char *creds_path,
+                int creds_fd,
                 const char *log_namespace,
                 unsigned long mount_propagation_flag,
                 VeritySettings *verity,
@@ -133,7 +134,7 @@ int setup_namespace(
                 const char *incoming_dir,
                 const char *extension_dir,
                 const char *notify_socket,
-                const char *host_os_release,
+                const char *host_os_release_stage,
                 char **error_path);
 
 #define RUN_SYSTEMD_EMPTY "/run/systemd/empty"

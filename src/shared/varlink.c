@@ -265,11 +265,11 @@ DEFINE_PRIVATE_STRING_TABLE_LOOKUP_TO_STRING(varlink_state, VarlinkState);
 
 static int varlink_format_queue(Varlink *v);
 
-static inline const char *varlink_description(Varlink *v) {
+static const char *varlink_description(Varlink *v) {
         return (v ? v->description : NULL) ?: "varlink";
 }
 
-static inline const char *varlink_server_description(VarlinkServer *s) {
+static const char *varlink_server_description(VarlinkServer *s) {
         return (s ? s->description : NULL) ?: "varlink";
 }
 
@@ -473,12 +473,7 @@ static void varlink_clear(Varlink *v) {
         v->pushed_fds = mfree(v->pushed_fds);
         v->n_pushed_fds = 0;
 
-        while (v->output_queue) {
-                VarlinkJsonQueueItem *q = v->output_queue;
-
-                LIST_REMOVE(queue, v->output_queue, q);
-                varlink_json_queue_item_free(q);
-        }
+        LIST_CLEAR(queue, v->output_queue, varlink_json_queue_item_free);
         v->output_queue_tail = NULL;
 
         v->event = sd_event_unref(v->event);
@@ -1279,8 +1274,8 @@ int varlink_wait(Varlink *v, usec_t timeout) {
                 return events;
 
         r = fd_wait_for_event(fd, events, t);
-        if (r < 0 && ERRNO_IS_TRANSIENT(r)) /* Treat EINTR as not a timeout, but also nothing happened, and
-                                             * the caller gets a chance to call back into us */
+        if (ERRNO_IS_NEG_TRANSIENT(r)) /* Treat EINTR as not a timeout, but also nothing happened, and
+                                        * the caller gets a chance to call back into us */
                 return 1;
         if (r <= 0)
                 return r;
@@ -1368,14 +1363,11 @@ int varlink_flush(Varlink *v) {
                 }
 
                 r = fd_wait_for_event(v->fd, POLLOUT, USEC_INFINITY);
-                if (r < 0) {
-                        if (ERRNO_IS_TRANSIENT(r))
-                                continue;
-
+                if (ERRNO_IS_NEG_TRANSIENT(r))
+                        continue;
+                if (r < 0)
                         return varlink_log_errno(v, r, "Poll failed on fd: %m");
-                }
-
-                assert(r != 0);
+                assert(r > 0);
 
                 handle_revents(v, r);
         }
