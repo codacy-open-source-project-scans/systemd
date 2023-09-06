@@ -1813,8 +1813,8 @@ version_tag = get_option('version-tag')
 if version_tag == '' and git.found() and fs.exists(project_source_root / '.git')
         # If the working tree has no tags (CI builds), the first git-describe will fail
         # and we fall back to project_version-commitid instead.
-        version_cmd = '''git -C "$1" describe --abbrev=7 --dirty=^ 2>/dev/null ||
-                         echo "$2-$(git -C "$1" describe --always --abbrev=7)" |
+        version_cmd = '''(git -C "$1" describe --abbrev=7 --dirty=^ 2>/dev/null ||
+                          echo "$2-$(git -C "$1" describe --always --abbrev=7)") |
                          sed 's/^v//; s/-rc/~rc/' '''
 else
         version_cmd = '''echo "$2" '''
@@ -2326,17 +2326,27 @@ foreach dict : executables
 
                 if want_tests != 'false'
                         # Run the fuzz regression tests without any sanitizers enabled.
-                        # Additional invocations with sanitizers may be added below.
+                        # Additional invocations with sanitizers may get added below.
                         fuzz_ins = fuzz_regression_tests.get(name, {})
                         foreach directive : fuzz_ins.get('directives', [])
-                                test('@0@_@1@'.format(name, fs.name(directive.full_path())),
+                                tt = '@0@_@1@'.format(name, fs.name(directive.full_path()))
+                                if tt.substring(45) != ''
+                                        error('Directive sample name is too long:', directive.full_path())
+                                endif
+
+                                test(tt,
                                      exe,
                                      suite : 'fuzz',
                                      args : directive.full_path(),
                                      depends : directive)
                         endforeach
                         foreach file : fuzz_ins.get('files', [])
-                                test('@0@_@1@'.format(name, fs.name(file)),
+                                tt = '@0@_@1@'.format(name, fs.name(file))
+                                if tt.substring(45) != ''
+                                        error('Fuzz sample name is too long:', fs.name(file))
+                                endif
+
+                                test(tt,
                                      exe,
                                      suite : 'fuzz',
                                      args : file)
@@ -2417,9 +2427,13 @@ ukify = custom_target(
         command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
         install : want_ukify,
         install_mode : 'rwxr-xr-x',
-        install_dir : libexecdir)
+        install_dir : bindir)
 if want_ukify
         public_programs += ukify
+
+        meson.add_install_script(sh, '-c',
+                                 ln_s.format(bindir / 'ukify',
+                                             libexecdir / 'ukify'))
 endif
 
 ############################################################

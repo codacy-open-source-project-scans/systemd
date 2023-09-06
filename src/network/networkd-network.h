@@ -10,6 +10,7 @@
 #include "bridge.h"
 #include "condition.h"
 #include "conf-parser.h"
+#include "firewall-util.h"
 #include "hashmap.h"
 #include "ipoib.h"
 #include "net-condition.h"
@@ -126,7 +127,7 @@ struct Network {
         bool dhcp_route_metric_set;
         uint32_t dhcp_route_table;
         bool dhcp_route_table_set;
-        uint32_t dhcp_fallback_lease_lifetime;
+        usec_t dhcp_fallback_lease_lifetime_usec;
         uint32_t dhcp_route_mtu;
         uint16_t dhcp_client_port;
         int dhcp_critical;
@@ -163,6 +164,7 @@ struct Network {
         OrderedHashmap *dhcp_client_send_options;
         OrderedHashmap *dhcp_client_send_vendor_options;
         char *dhcp_netlabel;
+        NFTSetContext dhcp_nft_set_context;
 
         /* DHCPv6 Client support */
         bool dhcp6_use_address;
@@ -191,6 +193,7 @@ struct Network {
         Set *dhcp6_request_options;
         char *dhcp6_netlabel;
         bool dhcp6_send_release;
+        NFTSetContext dhcp6_nft_set_context;
 
         /* DHCP Server Support */
         bool dhcp_server;
@@ -239,6 +242,10 @@ struct Network {
         OrderedSet *router_search_domains;
         int router_uplink_index;
         char *router_uplink_name;
+        /* Mobile IPv6 Home Agent */
+        bool router_home_agent_information;
+        uint16_t router_home_agent_preference;
+        usec_t home_agent_lifetime_usec;
 
         /* DHCP Prefix Delegation support */
         int dhcp_pd;
@@ -251,6 +258,7 @@ struct Network {
         int dhcp_pd_uplink_index;
         char *dhcp_pd_uplink_name;
         char *dhcp_pd_netlabel;
+        NFTSetContext dhcp_pd_nft_set_context;
 
         /* Bridge Support */
         int use_bpdu;
@@ -325,6 +333,7 @@ struct Network {
         bool ipv6_accept_ra_use_icmp6_ratelimit;
         bool ipv6_accept_ra_quickack;
         bool ipv6_accept_ra_use_captive_portal;
+        bool ipv6_accept_ra_use_pref64;
         bool active_slave;
         bool primary_slave;
         DHCPUseDomains ipv6_accept_ra_use_domains;
@@ -343,6 +352,7 @@ struct Network {
         Set *ndisc_allow_listed_route_prefix;
         Set *ndisc_tokens;
         char *ndisc_netlabel;
+        NFTSetContext ndisc_nft_set_context;
 
         /* LLDP support */
         LLDPMode lldp_mode; /* LLDP reception */
