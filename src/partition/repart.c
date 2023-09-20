@@ -2195,7 +2195,7 @@ static int context_read_definitions(Context *context) {
 
                 assert_se(dp = p->siblings[VERITY_DATA]);
 
-                if (dp->minimize == MINIMIZE_OFF && !(p->copy_blocks_path || p->copy_blocks_auto))
+                if (dp->minimize == MINIMIZE_OFF && !(dp->copy_blocks_path || dp->copy_blocks_auto))
                         return log_syntax(NULL, LOG_ERR, p->definition_path, 1, SYNTHETIC_ERRNO(EINVAL),
                                           "Minimize= set for verity hash partition but data partition does "
                                           "not set CopyBlocks= or Minimize=");
@@ -4166,7 +4166,7 @@ static int partition_format_verity_sig(Context *context, Partition *p) {
         if (lseek(whole_fd, p->offset, SEEK_SET) == (off_t) -1)
                 return log_error_errno(errno, "Failed to seek to partition %s offset: %m", strna(hint));
 
-        r = loop_write(whole_fd, text, p->new_size, /*do_poll=*/ false);
+        r = loop_write(whole_fd, text, p->new_size);
         if (r < 0)
                 return log_error_errno(r, "Failed to write verity signature to partition %s: %m", strna(hint));
 
@@ -4398,11 +4398,9 @@ static int add_subvolume_path(const char *path, Set **subvolumes) {
         if (r < 0)
                 return log_error_errno(r, "Failed to stat source file '%s/%s': %m", strempty(arg_root), path);
 
-        r = set_ensure_put(subvolumes, &inode_hash_ops, st);
+        r = set_ensure_consume(subvolumes, &inode_hash_ops, TAKE_PTR(st));
         if (r < 0)
                 return log_oom();
-        if (r > 0)
-                TAKE_PTR(st);
 
         return 0;
 }
