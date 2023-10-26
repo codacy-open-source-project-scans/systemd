@@ -18,21 +18,9 @@
 #include "varlink-internal.h"
 
 int manager_open_serialization(Manager *m, FILE **ret_f) {
-        _cleanup_close_ int fd = -EBADF;
-        FILE *f;
-
         assert(ret_f);
 
-        fd = open_serialization_fd("systemd-state");
-        if (fd < 0)
-                return fd;
-
-        f = take_fdopen(&fd, "w+");
-        if (!f)
-                return -errno;
-
-        *ret_f = f;
-        return 0;
+        return open_serialization_file("systemd-state", ret_f);
 }
 
 static bool manager_timestamp_shall_serialize(ManagerTimestamp t) {
@@ -195,7 +183,7 @@ int manager_serialize(
                 if (u->id != t)
                         continue;
 
-                r = unit_serialize(u, f, fds, switching_root);
+                r = unit_serialize_state(u, f, fds, switching_root);
                 if (r < 0)
                         return r;
         }
@@ -222,7 +210,7 @@ static int manager_deserialize_one_unit(Manager *m, const char *name, FILE *f, F
                 return log_notice_errno(r, "Failed to load unit \"%s\", skipping deserialization: %m", name);
         }
 
-        r = unit_deserialize(u, f, fds);
+        r = unit_deserialize_state(u, f, fds);
         if (r < 0) {
                 if (r == -ENOMEM)
                         return r;
@@ -233,25 +221,23 @@ static int manager_deserialize_one_unit(Manager *m, const char *name, FILE *f, F
 }
 
 static int manager_deserialize_units(Manager *m, FILE *f, FDSet *fds) {
-        const char *unit_name;
         int r;
 
         for (;;) {
                 _cleanup_free_ char *line = NULL;
+
                 /* Start marker */
-                r = read_line(f, LONG_LINE_MAX, &line);
+                r = read_stripped_line(f, LONG_LINE_MAX, &line);
                 if (r < 0)
                         return log_error_errno(r, "Failed to read serialization line: %m");
                 if (r == 0)
                         break;
 
-                unit_name = strstrip(line);
-
-                r = manager_deserialize_one_unit(m, unit_name, f, fds);
+                r = manager_deserialize_one_unit(m, line, f, fds);
                 if (r == -ENOMEM)
                         return r;
                 if (r < 0) {
-                        r = unit_deserialize_skip(f);
+                        r = unit_deserialize_state_skip(f);
                         if (r < 0)
                                 return r;
                 }
@@ -470,12 +456,11 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                 } else if ((val = startswith(l, "notify-fd="))) {
                         int fd;
 
-                        if ((fd = parse_fd(val)) < 0 || !fdset_contains(fds, fd))
-                                log_notice("Failed to parse notify fd, ignoring: \"%s\"", val);
-                        else {
+                        fd = deserialize_fd(fds, val);
+                        if (fd >= 0) {
                                 m->notify_event_source = sd_event_source_disable_unref(m->notify_event_source);
                                 safe_close(m->notify_fd);
-                                m->notify_fd = fdset_remove(fds, fd);
+                                m->notify_fd = fd;
                         }
 
                 } else if ((val = startswith(l, "notify-socket="))) {
@@ -486,12 +471,11 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                 } else if ((val = startswith(l, "cgroups-agent-fd="))) {
                         int fd;
 
-                        if ((fd = parse_fd(val)) < 0 || !fdset_contains(fds, fd))
-                                log_notice("Failed to parse cgroups agent fd, ignoring.: %s", val);
-                        else {
+                        fd = deserialize_fd(fds, val);
+                        if (fd >= 0) {
                                 m->cgroups_agent_event_source = sd_event_source_disable_unref(m->cgroups_agent_event_source);
                                 safe_close(m->cgroups_agent_fd);
-                                m->cgroups_agent_fd = fdset_remove(fds, fd);
+                                m->cgroups_agent_fd = fd;
                         }
 
                 } else if ((val = startswith(l, "user-lookup="))) {
@@ -507,7 +491,7 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                         }
 
                 } else if ((val = startswith(l, "dynamic-user=")))
-                        dynamic_user_deserialize_one(m, val, fds);
+                        dynamic_user_deserialize_one(m, val, fds, NULL);
                 else if ((val = startswith(l, "destroy-ipc-uid=")))
                         manager_deserialize_uid_refs_one(m, val);
                 else if ((val = startswith(l, "destroy-ipc-gid=")))
@@ -520,25 +504,16 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                                 return -ENOMEM;
                 } else if ((val = startswith(l, "varlink-server-socket-address="))) {
                         if (!m->varlink_server && MANAGER_IS_SYSTEM(m)) {
-                                _cleanup_(varlink_server_unrefp) VarlinkServer *s = NULL;
-
-                                r = manager_setup_varlink_server(m, &s);
+                                r = manager_varlink_init(m);
                                 if (r < 0) {
                                         log_warning_errno(r, "Failed to setup varlink server, ignoring: %m");
                                         continue;
                                 }
 
-                                r = varlink_server_attach_event(s, m->event, SD_EVENT_PRIORITY_NORMAL);
-                                if (r < 0) {
-                                        log_warning_errno(r, "Failed to attach varlink connection to event loop, ignoring: %m");
-                                        continue;
-                                }
-
-                                m->varlink_server = TAKE_PTR(s);
                                 deserialize_varlink_sockets = true;
                         }
 
-                        /* To void unnecessary deserialization (i.e. during reload vs. reexec) we only deserialize
+                        /* To avoid unnecessary deserialization (i.e. during reload vs. reexec) we only deserialize
                          * the FDs if we had to create a new m->varlink_server. The deserialize_varlink_sockets flag
                          * is initialized outside of the loop, is flipped after the VarlinkServer is setup, and
                          * remains set until all serialized contents are handled. */

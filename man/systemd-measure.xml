@@ -191,7 +191,8 @@
         <listitem><para>Controls which boot phases to calculate expected PCR 11 values for. This takes a
         series of colon-separated strings that encode boot "paths" for entering a specific phase of the boot
         process. Each of the specified strings is measured by the
-        <filename>systemd-pcrphase-initrd.service</filename> and
+        <filename>systemd-pcrphase-initrd.service</filename>,
+        <filename>systemd-pcrphase-sysinit.service</filename>, and
         <citerefentry><refentrytitle>systemd-pcrphase.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
         into PCR 11 during different milestones of the boot process. This switch may be specified multiple
         times to calculate PCR values for multiple boot phases at once. If not used defaults to
@@ -294,7 +295,7 @@ $ openssl rsa -pubout -in tpm2-pcr-private.pem -out tpm2-pcr-public.pem
 
      <para>And then unlock the device with the signature:</para>
 
-     <programlisting># /usr/lib/systemd/systemd-cryptsetup attach \
+     <programlisting># systemd-cryptsetup attach \
      volume5 /dev/sda5 - \
      tpm2-device=auto,tpm2-signature=/path/to/tpm2-pcr-signature.json</programlisting>
 

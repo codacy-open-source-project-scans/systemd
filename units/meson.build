@@ -431,6 +431,15 @@ units = [
           'conditions' : ['ENABLE_OOMD'],
         },
         {
+          'file' : 'systemd-pcrextend@.service.in',
+          'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
+        },
+        {
+          'file' : 'systemd-pcrextend.socket',
+          'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
+          'symlinks' : ['sockets.target.wants/'],
+        },
+        {
           'file' : 'systemd-pcrfs-root.service.in',
           'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
         },
@@ -455,6 +464,16 @@ units = [
         },
         {
           'file' : 'systemd-pcrphase.service.in',
+          'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
+          'symlinks' : ['sysinit.target.wants/'],
+        },
+        {
+          'file' : 'systemd-tpm2-setup.service.in',
+          'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
+          'symlinks' : ['sysinit.target.wants/'],
+        },
+        {
+          'file' : 'systemd-tpm2-setup-early.service.in',
           'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
           'symlinks' : ['sysinit.target.wants/'],
         },
@@ -508,6 +527,15 @@ units = [
         },
         {
           'file' : 'systemd-sysext.service',
+          'conditions' : ['ENABLE_SYSEXT'],
+        },
+        {
+          'file' : 'systemd-sysext.socket',
+          'conditions' : ['ENABLE_SYSEXT'],
+          'symlinks' : ['sockets.target.wants/'],
+        },
+        {
+          'file' : 'systemd-sysext@.service',
           'conditions' : ['ENABLE_SYSEXT'],
         },
         {

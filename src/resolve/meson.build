@@ -225,6 +225,7 @@ if conf.get('ENABLE_RESOLVE') == 1
                                  ln_s.format(bindir / 'resolvectl',
                                              sbindir / 'resolvconf'))
 
+        # symlink for backwards compatibility after rename
         meson.add_install_script(sh, '-c',
                                  ln_s.format(bindir / 'resolvectl',
                                              bindir / 'systemd-resolve'))
@@ -236,4 +237,4 @@ custom_target(
         output : 'resolved.conf',
         command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
         install : conf.get('ENABLE_RESOLVE') == 1 and install_sysconfdir_samples,
-        install_dir : pkgsysconfdir)
+        install_dir : pkgconfigfiledir)

@@ -107,13 +107,16 @@
  * sector size devices were generally assumed to have an even number of sectors, hence at the worst we'll
  * waste 3K per partition, which is probably fine. */
 
-static enum {
+typedef enum EmptyMode {
+        EMPTY_UNSET,    /* no choice has been made yet */
         EMPTY_REFUSE,   /* refuse empty disks, never create a partition table */
         EMPTY_ALLOW,    /* allow empty disks, create partition table if necessary */
         EMPTY_REQUIRE,  /* require an empty disk, create a partition table */
         EMPTY_FORCE,    /* make disk empty, erase everything, create a partition table always */
         EMPTY_CREATE,   /* create disk as loopback file, create a partition table always */
-} arg_empty = EMPTY_REFUSE;
+        _EMPTY_MODE_MAX,
+        _EMPTY_MODE_INVALID = -EINVAL,
+} EmptyMode;
 
 typedef enum FilterPartitionType {
         FILTER_PARTITIONS_NONE,
@@ -123,6 +126,7 @@ typedef enum FilterPartitionType {
         _FILTER_PARTITIONS_INVALID = -EINVAL,
 } FilterPartitionsType;
 
+static EmptyMode arg_empty = EMPTY_UNSET;
 static bool arg_dry_run = true;
 static const char *arg_node = NULL;
 static char *arg_root = NULL;
@@ -146,10 +150,8 @@ static X509 *arg_certificate = NULL;
 static char *arg_tpm2_device = NULL;
 static Tpm2PCRValue *arg_tpm2_hash_pcr_values = NULL;
 static size_t arg_tpm2_n_hash_pcr_values = 0;
-static bool arg_tpm2_hash_pcr_values_use_default = true;
 static char *arg_tpm2_public_key = NULL;
 static uint32_t arg_tpm2_public_key_pcr_mask = 0;
-static bool arg_tpm2_public_key_pcr_mask_use_default = true;
 static bool arg_split = false;
 static GptPartitionType *arg_filter_partitions = NULL;
 static size_t arg_n_filter_partitions = 0;
@@ -161,6 +163,8 @@ static ImagePolicy *arg_image_policy = NULL;
 static Architecture arg_architecture = _ARCHITECTURE_INVALID;
 static int arg_offline = -1;
 static char **arg_copy_from = NULL;
+static char *arg_copy_source = NULL;
+static char *arg_make_ddi = NULL;
 
 STATIC_DESTRUCTOR_REGISTER(arg_root, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_image, freep);
@@ -174,6 +178,8 @@ STATIC_DESTRUCTOR_REGISTER(arg_tpm2_public_key, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_filter_partitions, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_image_policy, image_policy_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_copy_from, strv_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_copy_source, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_make_ddi, freep);
 
 typedef struct FreeArea FreeArea;
 
@@ -260,8 +266,7 @@ typedef struct Partition {
         int read_only;
         int growfs;
 
-        uint8_t *roothash;
-        size_t roothash_size;
+        struct iovec roothash;
 
         char *split_name_format;
         char *split_path;
@@ -301,6 +306,15 @@ typedef struct Context {
         bool from_scratch;
 } Context;
 
+static const char *empty_mode_table[_EMPTY_MODE_MAX] = {
+        [EMPTY_UNSET]   = "unset",
+        [EMPTY_REFUSE]  = "refuse",
+        [EMPTY_ALLOW]   = "allow",
+        [EMPTY_REQUIRE] = "require",
+        [EMPTY_FORCE]   = "force",
+        [EMPTY_CREATE]  = "create",
+};
+
 static const char *encrypt_mode_table[_ENCRYPT_MODE_MAX] = {
         [ENCRYPT_OFF] = "off",
         [ENCRYPT_KEY_FILE] = "key-file",
@@ -321,6 +335,7 @@ static const char *minimize_mode_table[_MINIMIZE_MODE_MAX] = {
         [MINIMIZE_GUESS] = "guess",
 };
 
+DEFINE_PRIVATE_STRING_TABLE_LOOKUP(empty_mode, EmptyMode);
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING_WITH_BOOLEAN(encrypt_mode, EncryptMode, ENCRYPT_KEY_FILE);
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP(verity_mode, VerityMode);
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING_WITH_BOOLEAN(minimize_mode, MinimizeMode, MINIMIZE_BEST);
@@ -400,7 +415,7 @@ static Partition* partition_free(Partition *p) {
         strv_free(p->subvolumes);
         free(p->verity_match_key);
 
-        free(p->roothash);
+        iovec_done(&p->roothash);
 
         free(p->split_name_format);
         unlink_and_free(p->split_path);
@@ -1373,8 +1388,17 @@ static int config_parse_fstype(
                 void *userdata) {
 
         char **fstype = ASSERT_PTR(data);
+        const char *e;
 
         assert(rvalue);
+
+        /* Let's provide an easy way to override the chosen fstype for file system partitions */
+        e = secure_getenv("SYSTEMD_REPART_OVERRIDE_FSTYPE");
+        if (e && !streq(rvalue, e)) {
+                log_syntax(unit, LOG_NOTICE, filename, line, 0,
+                           "Overriding defined file system type '%s' with '%s'.", rvalue, e);
+                rvalue = e;
+        }
 
         if (!filename_is_valid(rvalue))
                 return log_syntax(unit, LOG_ERR, filename, line, 0,
@@ -2416,6 +2440,9 @@ static int context_load_partition_table(Context *context) {
                 /* Always reinitiaize the disk, don't consider what there was on the disk before */
                 from_scratch = true;
                 break;
+
+        default:
+                assert_not_reached();
         }
 
         if (from_scratch) {
@@ -2794,7 +2821,7 @@ static int context_dump_partitions(Context *context) {
                 if (p->verity != VERITY_OFF) {
                         Partition *hp = p->verity == VERITY_HASH ? p : p->siblings[VERITY_HASH];
 
-                        rh = hp->roothash ? hexmem(hp->roothash, hp->roothash_size) : strdup("TBD");
+                        rh = iovec_is_set(&hp->roothash) ? hexmem(hp->roothash.iov_base, hp->roothash.iov_len) : strdup("TBD");
                         if (!rh)
                                 return log_oom();
                 }
@@ -3071,7 +3098,7 @@ static int context_dump_partition_bar(Context *context) {
 
 static bool context_has_roothash(Context *context) {
         LIST_FOREACH(partitions, p, context->partitions)
-                if (p->roothash)
+                if (iovec_is_set(&p->roothash))
                         return true;
 
         return false;
@@ -3356,6 +3383,9 @@ static int context_wipe_and_discard(Context *context) {
 
         assert(context);
 
+        if (arg_empty == EMPTY_CREATE) /* If we just created the image, no need to wipe */
+                return 0;
+
         /* Wipe and discard the contents of all partitions we are about to create. We skip the discarding if
          * we were supposed to start from scratch anyway, as in that case we just discard the whole block
          * device in one go early on. */
@@ -3529,7 +3559,7 @@ static int partition_target_prepare(
         };
 
         if (!need_path) {
-                if (lseek(whole_fd, p->offset, SEEK_SET) == (off_t) -1)
+                if (lseek(whole_fd, p->offset, SEEK_SET) < 0)
                         return log_error_errno(errno, "Failed to seek to partition offset: %m");
 
                 t->whole_fd = whole_fd;
@@ -3605,10 +3635,10 @@ static int partition_target_sync(Context *context, Partition *p, PartitionTarget
         } else if (t->fd >= 0) {
                 struct stat st;
 
-                if (lseek(whole_fd, p->offset, SEEK_SET) == (off_t) -1)
+                if (lseek(whole_fd, p->offset, SEEK_SET) < 0)
                         return log_error_errno(errno, "Failed to seek to partition offset: %m");
 
-                if (lseek(t->fd, 0, SEEK_SET) == (off_t) -1)
+                if (lseek(t->fd, 0, SEEK_SET) < 0)
                         return log_error_errno(errno, "Failed to seek to start of temporary file: %m");
 
                 if (fstat(t->fd, &st) < 0)
@@ -3761,7 +3791,7 @@ static int partition_encrypt(Context *context, Partition *p, PartitionTarget *ta
                 _cleanup_(tpm2_context_unrefp) Tpm2Context *tpm2_context = NULL;
                 r = tpm2_context_new(arg_tpm2_device, &tpm2_context);
                 if (r < 0)
-                        return r;
+                        return log_error_errno(r, "Failed to create TPM2 context: %m");
 
                 TPM2B_PUBLIC public;
                 if (pubkey) {
@@ -3772,7 +3802,7 @@ static int partition_encrypt(Context *context, Partition *p, PartitionTarget *ta
 
                 r = tpm2_pcr_read_missing_values(tpm2_context, arg_tpm2_hash_pcr_values, arg_tpm2_n_hash_pcr_values);
                 if (r < 0)
-                        return r;
+                        return log_error_errno(r, "Could not read pcr values: %m");
 
                 uint16_t hash_pcr_bank = 0;
                 uint32_t hash_pcr_mask = 0;
@@ -3792,11 +3822,12 @@ static int partition_encrypt(Context *context, Partition *p, PartitionTarget *ta
                 }
 
                 TPM2B_DIGEST policy = TPM2B_DIGEST_MAKE(NULL, TPM2_SHA256_DIGEST_SIZE);
-                r = tpm2_calculate_sealing_policy(arg_tpm2_hash_pcr_values, arg_tpm2_n_hash_pcr_values, &public, /* use_pin= */ false, &policy);
+                r = tpm2_calculate_sealing_policy(arg_tpm2_hash_pcr_values, arg_tpm2_n_hash_pcr_values, pubkey ? &public : NULL, /* use_pin= */ false, &policy);
                 if (r < 0)
-                        return r;
+                        return log_error_errno(r, "Could not calculate sealing policy digest: %m");
 
                 r = tpm2_seal(tpm2_context,
+                              /* seal_key_handle= */ 0,
                               &policy,
                               /* pin= */ NULL,
                               &secret, &secret_size,
@@ -3952,8 +3983,6 @@ static int partition_format_verity_hash(
         _cleanup_(partition_target_freep) PartitionTarget *t = NULL;
         _cleanup_(sym_crypt_freep) struct crypt_device *cd = NULL;
         _cleanup_free_ char *hint = NULL;
-        _cleanup_free_ uint8_t *rh = NULL;
-        size_t rhs;
         int r;
 
         assert(context);
@@ -4032,30 +4061,31 @@ static int partition_format_verity_hash(
         r = sym_crypt_get_volume_key_size(cd);
         if (r < 0)
                 return log_error_errno(r, "Failed to determine verity root hash size of partition %s: %m", strna(hint));
-        rhs = (size_t) r;
 
-        rh = malloc(rhs);
-        if (!rh)
+        _cleanup_(iovec_done) struct iovec rh = {
+                .iov_base = malloc(r),
+                .iov_len = r,
+        };
+        if (!rh.iov_base)
                 return log_oom();
 
-        r = sym_crypt_volume_key_get(cd, CRYPT_ANY_SLOT, (char *) rh, &rhs, NULL, 0);
+        r = sym_crypt_volume_key_get(cd, CRYPT_ANY_SLOT, (char *) rh.iov_base, &rh.iov_len, NULL, 0);
         if (r < 0)
                 return log_error_errno(r, "Failed to get verity root hash of partition %s: %m", strna(hint));
 
-        assert(rhs >= sizeof(sd_id128_t) * 2);
+        assert(rh.iov_len >= sizeof(sd_id128_t) * 2);
 
         if (!dp->new_uuid_is_set) {
-                memcpy_safe(dp->new_uuid.bytes, rh, sizeof(sd_id128_t));
+                memcpy_safe(dp->new_uuid.bytes, rh.iov_base, sizeof(sd_id128_t));
                 dp->new_uuid_is_set = true;
         }
 
         if (!p->new_uuid_is_set) {
-                memcpy_safe(p->new_uuid.bytes, rh + rhs - sizeof(sd_id128_t), sizeof(sd_id128_t));
+                memcpy_safe(p->new_uuid.bytes, (uint8_t*) rh.iov_base + (rh.iov_len - sizeof(sd_id128_t)), sizeof(sd_id128_t));
                 p->new_uuid_is_set = true;
         }
 
-        p->roothash = TAKE_PTR(rh);
-        p->roothash_size = rhs;
+        p->roothash = TAKE_STRUCT(rh);
 
         return 0;
 #else
@@ -4064,10 +4094,8 @@ static int partition_format_verity_hash(
 }
 
 static int sign_verity_roothash(
-                const uint8_t *roothash,
-                size_t roothash_size,
-                uint8_t **ret_signature,
-                size_t *ret_signature_size) {
+                const struct iovec *roothash,
+                struct iovec *ret_signature) {
 
 #if HAVE_OPENSSL
         _cleanup_(BIO_freep) BIO *rb = NULL;
@@ -4077,11 +4105,10 @@ static int sign_verity_roothash(
         int sigsz;
 
         assert(roothash);
-        assert(roothash_size > 0);
+        assert(iovec_is_set(roothash));
         assert(ret_signature);
-        assert(ret_signature_size);
 
-        hex = hexmem(roothash, roothash_size);
+        hex = hexmem(roothash->iov_base, roothash->iov_len);
         if (!hex)
                 return log_oom();
 
@@ -4099,8 +4126,8 @@ static int sign_verity_roothash(
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to convert PKCS7 signature to DER: %s",
                                        ERR_error_string(ERR_get_error(), NULL));
 
-        *ret_signature = TAKE_PTR(sig);
-        *ret_signature_size = sigsz;
+        ret_signature->iov_base = TAKE_PTR(sig);
+        ret_signature->iov_len = sigsz;
 
         return 0;
 #else
@@ -4110,11 +4137,10 @@ static int sign_verity_roothash(
 
 static int partition_format_verity_sig(Context *context, Partition *p) {
         _cleanup_(json_variant_unrefp) JsonVariant *v = NULL;
-        _cleanup_free_ uint8_t *sig = NULL;
+        _cleanup_(iovec_done) struct iovec sig = {};
         _cleanup_free_ char *text = NULL, *hint = NULL;
         Partition *hp;
         uint8_t fp[X509_FINGERPRINT_SIZE];
-        size_t sigsz = 0; /* avoid false maybe-uninitialized warning */
         int whole_fd, r;
 
         assert(p->verity == VERITY_SIG);
@@ -4134,7 +4160,7 @@ static int partition_format_verity_sig(Context *context, Partition *p) {
 
         assert_se((whole_fd = fdisk_get_devfd(context->fdisk_context)) >= 0);
 
-        r = sign_verity_roothash(hp->roothash, hp->roothash_size, &sig, &sigsz);
+        r = sign_verity_roothash(&hp->roothash, &sig);
         if (r < 0)
                 return r;
 
@@ -4144,12 +4170,12 @@ static int partition_format_verity_sig(Context *context, Partition *p) {
 
         r = json_build(&v,
                         JSON_BUILD_OBJECT(
-                                JSON_BUILD_PAIR("rootHash", JSON_BUILD_HEX(hp->roothash, hp->roothash_size)),
+                                JSON_BUILD_PAIR("rootHash", JSON_BUILD_HEX(hp->roothash.iov_base, hp->roothash.iov_len)),
                                 JSON_BUILD_PAIR(
                                         "certificateFingerprint",
                                         JSON_BUILD_HEX(fp, sizeof(fp))
                                 ),
-                                JSON_BUILD_PAIR("signature", JSON_BUILD_BASE64(sig, sigsz))
+                                JSON_BUILD_PAIR("signature", JSON_BUILD_IOVEC_BASE64(&sig))
                         )
         );
         if (r < 0)
@@ -4159,11 +4185,14 @@ static int partition_format_verity_sig(Context *context, Partition *p) {
         if (r < 0)
                 return log_error_errno(r, "Failed to format verity signature JSON object: %m");
 
+        if (strlen(text)+1 > p->new_size)
+                return log_error_errno(SYNTHETIC_ERRNO(E2BIG), "Verity signature too long for partition: %m");
+
         r = strgrowpad0(&text, p->new_size);
         if (r < 0)
                 return log_error_errno(r, "Failed to pad string to %s", FORMAT_BYTES(p->new_size));
 
-        if (lseek(whole_fd, p->offset, SEEK_SET) == (off_t) -1)
+        if (lseek(whole_fd, p->offset, SEEK_SET) < 0)
                 return log_error_errno(errno, "Failed to seek to partition %s offset: %m", strna(hint));
 
         r = loop_write(whole_fd, text, p->new_size);
@@ -4264,11 +4293,11 @@ static int add_exclude_path(const char *path, Hashmap **denylist, DenyType type)
         if (!st)
                 return log_oom();
 
-        r = chase_and_stat(path, arg_root, CHASE_PREFIX_ROOT, NULL, st);
+        r = chase_and_stat(path, arg_copy_source, CHASE_PREFIX_ROOT, NULL, st);
         if (r == -ENOENT)
                 return 0;
         if (r < 0)
-                return log_error_errno(r, "Failed to stat source file '%s/%s': %m", strempty(arg_root), path);
+                return log_error_errno(r, "Failed to stat source file '%s/%s': %m", strempty(arg_copy_source), path);
 
         r = hashmap_ensure_put(denylist, &inode_hash_ops, st, INT_TO_PTR(type));
         if (r == -EEXIST)
@@ -4392,11 +4421,11 @@ static int add_subvolume_path(const char *path, Set **subvolumes) {
         if (!st)
                 return log_oom();
 
-        r = chase_and_stat(path, arg_root, CHASE_PREFIX_ROOT, NULL, st);
+        r = chase_and_stat(path, arg_copy_source, CHASE_PREFIX_ROOT, NULL, st);
         if (r == -ENOENT)
                 return 0;
         if (r < 0)
-                return log_error_errno(r, "Failed to stat source file '%s/%s': %m", strempty(arg_root), path);
+                return log_error_errno(r, "Failed to stat source file '%s/%s': %m", strempty(arg_copy_source), path);
 
         r = set_ensure_consume(subvolumes, &inode_hash_ops, TAKE_PTR(st));
         if (r < 0)
@@ -4459,9 +4488,9 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
                 if (rfd < 0)
                         return rfd;
 
-                sfd = chase_and_open(*source, arg_root, CHASE_PREFIX_ROOT, O_PATH|O_DIRECTORY|O_CLOEXEC|O_NOCTTY, NULL);
+                sfd = chase_and_open(*source, arg_copy_source, CHASE_PREFIX_ROOT, O_PATH|O_DIRECTORY|O_CLOEXEC|O_NOCTTY, NULL);
                 if (sfd < 0)
-                        return log_error_errno(sfd, "Failed to open source file '%s%s': %m", strempty(arg_root), *source);
+                        return log_error_errno(sfd, "Failed to open source file '%s%s': %m", strempty(arg_copy_source), *source);
 
                 (void) copy_xattr(sfd, NULL, rfd, NULL, COPY_ALL_XATTRS);
                 (void) copy_access(sfd, rfd);
@@ -4483,9 +4512,13 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
                 if (r < 0)
                         return r;
 
-                sfd = chase_and_open(*source, arg_root, CHASE_PREFIX_ROOT, O_CLOEXEC|O_NOCTTY, NULL);
+                sfd = chase_and_open(*source, arg_copy_source, CHASE_PREFIX_ROOT, O_CLOEXEC|O_NOCTTY, NULL);
+                if (sfd == -ENOENT) {
+                        log_notice_errno(sfd, "Failed to open source file '%s%s', skipping: %m", strempty(arg_copy_source), *source);
+                        continue;
+                }
                 if (sfd < 0)
-                        return log_error_errno(sfd, "Failed to open source file '%s%s': %m", strempty(arg_root), *source);
+                        return log_error_errno(sfd, "Failed to open source file '%s%s': %m", strempty(arg_copy_source), *source);
 
                 r = fd_verify_regular(sfd);
                 if (r < 0) {
@@ -4531,7 +4564,7 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
                                                 denylist, subvolumes_by_source_inode);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to copy '%s%s' to '%s%s': %m",
-                                                       strempty(arg_root), *source, strempty(root), *target);
+                                                       strempty(arg_copy_source), *source, strempty(root), *target);
                 } else {
                         _cleanup_free_ char *dn = NULL, *fn = NULL;
 
@@ -4562,7 +4595,7 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
 
                         r = copy_bytes(sfd, tfd, UINT64_MAX, COPY_REFLINK|COPY_HOLES|COPY_SIGINT|COPY_TRUNCATE);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to copy '%s' to '%s%s': %m", *source, strempty(arg_root), *target);
+                                return log_error_errno(r, "Failed to copy '%s' to '%s%s': %m", *source, strempty(arg_copy_source), *target);
 
                         (void) copy_xattr(sfd, NULL, tfd, NULL, COPY_ALL_XATTRS);
                         (void) copy_access(sfd, tfd);
@@ -5417,7 +5450,8 @@ static int context_write_partition_table(Context *context) {
 
         log_info("Applying changes.");
 
-        if (context->from_scratch) {
+        if (context->from_scratch && arg_empty != EMPTY_CREATE) {
+                /* Erase everything if we operate from scratch, except if the image was just created anyway, and thus is definitely empty. */
                 r = context_wipe_range(context, 0, context->total);
                 if (r < 0)
                         return r;
@@ -6361,7 +6395,11 @@ static int help(void) {
                "     --sector-size=SIZE   Set the logical sector size for the image\n"
                "     --architecture=ARCH  Set the generic architecture for the image\n"
                "     --offline=BOOL       Whether to build the image offline\n"
+               "  -s --copy-source=PATH   Specify the primary source tree to copy files from\n"
                "     --copy-from=IMAGE    Copy partitions from the given image(s)\n"
+               "  -S --make-ddi=sysext    Make a system extension DDI\n"
+               "  -C --make-ddi=confext   Make a configuration extension DDI\n"
+               "  -P --make-ddi=portable  Make a portable service DDI\n"
                "\nSee the %s for details.\n",
                program_invocation_short_name,
                ansi_highlight(),
@@ -6406,6 +6444,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_ARCHITECTURE,
                 ARG_OFFLINE,
                 ARG_COPY_FROM,
+                ARG_MAKE_DDI,
         };
 
         static const struct option options[] = {
@@ -6441,15 +6480,18 @@ static int parse_argv(int argc, char *argv[]) {
                 { "architecture",         required_argument, NULL, ARG_ARCHITECTURE         },
                 { "offline",              required_argument, NULL, ARG_OFFLINE              },
                 { "copy-from",            required_argument, NULL, ARG_COPY_FROM            },
+                { "copy-source",          required_argument, NULL, 's'                      },
+                { "make-ddi",             required_argument, NULL, ARG_MAKE_DDI             },
                 {}
         };
 
-        int c, r, dry_run = -1;
+        bool auto_hash_pcr_values = true, auto_public_key_pcr_mask = true;
+        int c, r;
 
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0)
+        while ((c = getopt_long(argc, argv, "hs:SCP", options, NULL)) >= 0)
 
                 switch (c) {
 
@@ -6474,24 +6516,15 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_EMPTY:
-                        if (isempty(optarg) || streq(optarg, "refuse"))
-                                arg_empty = EMPTY_REFUSE;
-                        else if (streq(optarg, "allow"))
-                                arg_empty = EMPTY_ALLOW;
-                        else if (streq(optarg, "require"))
-                                arg_empty = EMPTY_REQUIRE;
-                        else if (streq(optarg, "force"))
-                                arg_empty = EMPTY_FORCE;
-                        else if (streq(optarg, "create")) {
-                                arg_empty = EMPTY_CREATE;
+                        if (isempty(optarg)) {
+                                arg_empty = EMPTY_UNSET;
+                                break;
+                        }
 
-                                if (dry_run < 0)
-                                        dry_run = false; /* Imply --dry-run=no if we create the loopback file
-                                                          * anew. After all we cannot really break anyone's
-                                                          * partition tables that way. */
-                        } else
-                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                                       "Failed to parse --empty= parameter: %s", optarg);
+                        arg_empty = empty_mode_from_string(optarg);
+                        if (arg_empty < 0)
+                                return log_error_errno(arg_empty, "Failed to parse --empty= parameter: %s", optarg);
+
                         break;
 
                 case ARG_DISCARD:
@@ -6673,7 +6706,7 @@ static int parse_argv(int argc, char *argv[]) {
                 }
 
                 case ARG_TPM2_PCRS:
-                        arg_tpm2_hash_pcr_values_use_default = false;
+                        auto_hash_pcr_values = false;
                         r = tpm2_parse_pcr_argument_append(optarg, &arg_tpm2_hash_pcr_values, &arg_tpm2_n_hash_pcr_values);
                         if (r < 0)
                                 return r;
@@ -6688,7 +6721,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_TPM2_PUBLIC_KEY_PCRS:
-                        arg_tpm2_public_key_pcr_mask_use_default = false;
+                        auto_public_key_pcr_mask = false;
                         r = tpm2_parse_pcr_argument_to_mask(optarg, &arg_tpm2_public_key_pcr_mask);
                         if (r < 0)
                                 return r;
@@ -6777,6 +6810,39 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
                 }
 
+                case 's':
+                        r = parse_path_argument(optarg, /* suppress_root= */ false, &arg_copy_source);
+                        if (r < 0)
+                                return r;
+                        break;
+
+                case ARG_MAKE_DDI:
+                        if (!filename_is_valid(optarg))
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Invalid DDI type: %s", optarg);
+
+                        r = free_and_strdup_warn(&arg_make_ddi, optarg);
+                        if (r < 0)
+                                return r;
+                        break;
+
+                case 'S':
+                        r = free_and_strdup_warn(&arg_make_ddi, "sysext");
+                        if (r < 0)
+                                return r;
+                        break;
+
+                case 'C':
+                        r = free_and_strdup_warn(&arg_make_ddi, "confext");
+                        if (r < 0)
+                                return r;
+                        break;
+
+                case 'P':
+                        r = free_and_strdup_warn(&arg_make_ddi, "portable");
+                        if (r < 0)
+                                return r;
+                        break;
+
                 case '?':
                         return -EINVAL;
 
@@ -6786,7 +6852,39 @@ static int parse_argv(int argc, char *argv[]) {
 
         if (argc - optind > 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "Expected at most one argument, the path to the block device.");
+                                       "Expected at most one argument, the path to the block device or image file.");
+
+        if (arg_make_ddi) {
+                if (arg_definitions)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Combination of --make-ddi= and --definitions= is not supported.");
+                if (!IN_SET(arg_empty, EMPTY_UNSET, EMPTY_CREATE))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Combination of --make-ddi= and --empty=%s is not supported.", empty_mode_to_string(arg_empty));
+
+                /* Imply automatic sizing in DDI mode */
+                if (arg_size == UINT64_MAX)
+                        arg_size_auto = true;
+
+                if (!arg_copy_source)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "No --copy-source= specified, refusing.");
+
+                r = dir_is_empty(arg_copy_source, /* ignore_hidden_or_backup= */ false);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to determine if '%s' is empty: %m", arg_copy_source);
+                if (r > 0)
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOENT), "Source directory '%s' is empty, refusing to create empty image.", arg_copy_source);
+
+                if (sd_id128_is_null(arg_seed) && !arg_randomize) {
+                        /* We don't want that /etc/machine-id leaks into any image built this way, hence
+                         * let's randomize the seed if not specified explicitly */
+                        log_notice("No seed value specified, randomizing generated UUIDs, resulting image will not be reproducible.");
+                        arg_randomize = true;
+                }
+
+                arg_empty = EMPTY_CREATE;
+        }
+
+        if (arg_empty == EMPTY_UNSET) /* default to refuse mode, if not otherwise specified */
+                arg_empty = EMPTY_REFUSE;
 
         if (arg_factory_reset > 0 && IN_SET(arg_empty, EMPTY_FORCE, EMPTY_REQUIRE, EMPTY_CREATE))
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
@@ -6796,10 +6894,15 @@ static int parse_argv(int argc, char *argv[]) {
                 arg_dry_run = true; /* When --can-factory-reset is specified we don't make changes, hence
                                      * non-dry-run mode makes no sense. Thus, imply dry run mode so that we
                                      * open things strictly read-only. */
-        else if (dry_run >= 0)
-                arg_dry_run = dry_run;
+        else if (arg_empty == EMPTY_CREATE)
+                arg_dry_run = false; /* Imply --dry-run=no if we create the loopback file anew. After all we
+                                      * cannot really break anyone's partition tables that way. */
 
-        if (arg_empty == EMPTY_CREATE && (arg_size == UINT64_MAX && !arg_size_auto))
+        /* Disable pager once we are not just reviewing, but doing things. */
+        if (!arg_dry_run)
+                arg_pager_flags |= PAGER_DISABLE;
+
+        if (arg_empty == EMPTY_CREATE && arg_size == UINT64_MAX && !arg_size_auto)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "If --empty=create is specified, --size= must be specified, too.");
 
@@ -6826,21 +6929,27 @@ static int parse_argv(int argc, char *argv[]) {
 
         if (IN_SET(arg_empty, EMPTY_FORCE, EMPTY_REQUIRE, EMPTY_CREATE) && !arg_node && !arg_image)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "A path to a device node or loopback file must be specified when --empty=force, --empty=require or --empty=create are used.");
+                                       "A path to a device node or image file must be specified when --make-ddi=, --empty=force, --empty=require or --empty=create are used.");
 
         if (arg_split && !arg_node)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "A path to a loopback file must be specified when --split is used.");
+                                       "A path to an image file must be specified when --split is used.");
 
-        if (arg_tpm2_public_key_pcr_mask_use_default && arg_tpm2_public_key)
+        if (auto_public_key_pcr_mask && arg_tpm2_public_key) {
+                assert(arg_tpm2_public_key_pcr_mask == 0);
                 arg_tpm2_public_key_pcr_mask = INDEX_TO_MASK(uint32_t, TPM2_PCR_KERNEL_BOOT);
+        }
 
-        if (arg_tpm2_hash_pcr_values_use_default && !GREEDY_REALLOC_APPEND(
-                        arg_tpm2_hash_pcr_values,
-                        arg_tpm2_n_hash_pcr_values,
-                        &TPM2_PCR_VALUE_MAKE(TPM2_PCR_INDEX_DEFAULT, /* hash= */ 0, /* value= */ {}),
-                        1))
-                return log_oom();
+        if (auto_hash_pcr_values) {
+                assert(arg_tpm2_n_hash_pcr_values == 0);
+
+                if (!GREEDY_REALLOC_APPEND(
+                                    arg_tpm2_hash_pcr_values,
+                                    arg_tpm2_n_hash_pcr_values,
+                                    &TPM2_PCR_VALUE_MAKE(TPM2_PCR_INDEX_DEFAULT, /* hash= */ 0, /* value= */ {}),
+                                    1))
+                        return log_oom();
+        }
 
         if (arg_pretty < 0 && isatty(STDOUT_FILENO))
                 arg_pretty = true;
@@ -7329,6 +7438,13 @@ static int run(int argc, char *argv[]) {
                 }
         }
 
+        if (!arg_copy_source && arg_root) {
+                /* If no explicit copy source is specified, then use --root=/--image= */
+                arg_copy_source = strdup(arg_root);
+                if (!arg_copy_source)
+                        return log_oom();
+        }
+
         context = context_new(arg_seed);
         if (!context)
                 return log_oom();
@@ -7337,13 +7453,31 @@ static int run(int argc, char *argv[]) {
         if (r < 0)
                 return r;
 
-        strv_uniq(arg_definitions);
+        if (arg_make_ddi) {
+                _cleanup_free_ char *d = NULL, *dp = NULL;
+                assert(!arg_definitions);
+
+                d = strjoin(arg_make_ddi, ".repart.d/");
+                if (!d)
+                        return log_oom();
+
+                r = search_and_access(d, F_OK, arg_root, CONF_PATHS_USR_STRV("systemd/repart/definitions"), &dp);
+                if (r < 0)
+                        return log_error_errno(errno, "DDI type '%s' is not defined: %m", arg_make_ddi);
+
+                if (strv_consume(&arg_definitions, TAKE_PTR(dp)) < 0)
+                        return log_oom();
+        } else
+                strv_uniq(arg_definitions);
 
         r = context_read_definitions(context);
         if (r < 0)
                 return r;
 
         r = find_root(context);
+        if (r == -ENODEV)
+                return 76; /* Special return value which means "Root block device not found, so not doing
+                            * anything". This isn't really an error when called at boot. */
         if (r < 0)
                 return r;
 

@@ -90,6 +90,49 @@ int address_flags_to_string_alloc(uint32_t flags, int family, char **ret) {
         return 0;
 }
 
+static LinkAddressState address_state_from_scope(uint8_t scope) {
+        if (scope < RT_SCOPE_SITE)
+                /* universally accessible addresses found */
+                return LINK_ADDRESS_STATE_ROUTABLE;
+
+        if (scope < RT_SCOPE_HOST)
+                /* only link or site local addresses found */
+                return LINK_ADDRESS_STATE_DEGRADED;
+
+        /* no useful addresses found */
+        return LINK_ADDRESS_STATE_OFF;
+}
+
+void link_get_address_states(
+                Link *link,
+                LinkAddressState *ret_ipv4,
+                LinkAddressState *ret_ipv6,
+                LinkAddressState *ret_all) {
+
+        uint8_t ipv4_scope = RT_SCOPE_NOWHERE, ipv6_scope = RT_SCOPE_NOWHERE;
+        Address *address;
+
+        assert(link);
+
+        SET_FOREACH(address, link->addresses) {
+                if (!address_is_ready(address))
+                        continue;
+
+                if (address->family == AF_INET)
+                        ipv4_scope = MIN(ipv4_scope, address->scope);
+
+                if (address->family == AF_INET6)
+                        ipv6_scope = MIN(ipv6_scope, address->scope);
+        }
+
+        if (ret_ipv4)
+                *ret_ipv4 = address_state_from_scope(ipv4_scope);
+        if (ret_ipv6)
+                *ret_ipv6 = address_state_from_scope(ipv6_scope);
+        if (ret_all)
+                *ret_all = address_state_from_scope(MIN(ipv4_scope, ipv6_scope));
+}
+
 int address_new(Address **ret) {
         _cleanup_(address_freep) Address *address = NULL;
 
@@ -1626,7 +1669,7 @@ int manager_rtnl_process_address(sd_netlink *rtnl, sd_netlink_message *message, 
         uint16_t type;
         Address *address = NULL;
         Request *req = NULL;
-        bool is_new = false;
+        bool is_new = false, update_dhcp4;
         int ifindex, r;
 
         assert(rtnl);
@@ -1735,6 +1778,8 @@ int manager_rtnl_process_address(sd_netlink *rtnl, sd_netlink_message *message, 
                 assert_not_reached();
         }
 
+        update_dhcp4 = tmp->family == AF_INET6;
+
         /* Then, find the managed Address and Request objects corresponding to the received address. */
         (void) address_get(link, tmp, &address);
         (void) address_get_request(link, tmp, &req);
@@ -1750,7 +1795,7 @@ int manager_rtnl_process_address(sd_netlink *rtnl, sd_netlink_message *message, 
                 if (req)
                         address_enter_removed(req->userdata);
 
-                return 0;
+                goto finalize;
         }
 
         if (!address) {
@@ -1835,6 +1880,15 @@ int manager_rtnl_process_address(sd_netlink *rtnl, sd_netlink_message *message, 
         r = address_update(address);
         if (r < 0)
                 link_enter_failed(link);
+
+finalize:
+        if (update_dhcp4) {
+                r = dhcp4_update_ipv6_connectivity(link);
+                if (r < 0) {
+                        log_link_warning_errno(link, r, "Failed to notify IPv6 connectivity to DHCPv4 client: %m");
+                        link_enter_failed(link);
+                }
+        }
 
         return 1;
 }

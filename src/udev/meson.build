@@ -105,13 +105,12 @@ endif
 
 ############################################################
 
-udev_includes = [includes, include_directories('net', '.')]
 libudevd_core = static_library(
         'udev-core',
         libudevd_core_sources,
         link_config_gperf_c,
         keyboard_keys_from_name_h,
-        include_directories : udev_includes,
+        include_directories : includes + include_directories('net'),
         link_with : udev_link_with,
         dependencies : [libblkid,
                         libkmod,
@@ -204,6 +203,10 @@ executables += [
                 'suite' : 'udev',
         },
         udev_test_template + {
+                'sources' : files('net/test-link-config-tables.c'),
+                'suite' : 'udev',
+        },
+        udev_test_template + {
                 'sources' : files('test-udev-builtin.c'),
         },
         udev_test_template + {
@@ -236,7 +239,6 @@ executables += [
         },
         udev_fuzz_template + {
                 'sources' : files('net/fuzz-link-parser.c'),
-                'include_directories' : udev_includes,
         },
         udev_fuzz_template + {
                 'sources' : files('fuzz-udev-rule-parse-value.c'),
@@ -251,9 +253,9 @@ meson.add_install_script(sh, '-c', ln_s.format(bindir / 'udevadm',
 
 if install_sysconfdir_samples
         install_data('udev.conf',
-                     install_dir : sysconfdir / 'udev')
+                     install_dir : configfiledir / 'udev')
         install_data('iocost/iocost.conf',
-                     install_dir : sysconfdir / 'udev')
+                     install_dir : configfiledir / 'udev')
 endif
 
 udev_pc = custom_target(

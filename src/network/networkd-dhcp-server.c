@@ -6,8 +6,10 @@
 
 #include "sd-dhcp-server.h"
 
+#include "dhcp-protocol.h"
 #include "fd-util.h"
 #include "fileio.h"
+#include "network-common.h"
 #include "networkd-address.h"
 #include "networkd-dhcp-server-bus.h"
 #include "networkd-dhcp-server-static-lease.h"
@@ -323,19 +325,17 @@ static int dhcp4_server_set_dns_from_resolve_conf(Link *link) {
         for (;;) {
                 _cleanup_free_ char *line = NULL;
                 const char *a;
-                char *l;
 
-                r = read_line(f, LONG_LINE_MAX, &line);
+                r = read_stripped_line(f, LONG_LINE_MAX, &line);
                 if (r < 0)
                         return log_error_errno(r, "Failed to read " PRIVATE_UPLINK_RESOLV_CONF ": %m");
                 if (r == 0)
                         break;
 
-                l = strstrip(line);
-                if (IN_SET(*l, '#', ';', 0))
+                if (IN_SET(*line, '#', ';', 0))
                         continue;
 
-                a = first_word(l, "nameserver");
+                a = first_word(line, "nameserver");
                 if (!a)
                         continue;
 
@@ -391,18 +391,20 @@ static int dhcp4_server_configure(Link *link) {
                 return log_link_error_errno(link, r, "Failed to configure address pool for DHCPv4 server instance: %m");
 
         if (link->network->dhcp_server_max_lease_time_usec > 0) {
-                r = sd_dhcp_server_set_max_lease_time(link->dhcp_server,
-                                                      DIV_ROUND_UP(link->network->dhcp_server_max_lease_time_usec, USEC_PER_SEC));
+                r = sd_dhcp_server_set_max_lease_time(link->dhcp_server, link->network->dhcp_server_max_lease_time_usec);
                 if (r < 0)
                         return log_link_error_errno(link, r, "Failed to set maximum lease time for DHCPv4 server instance: %m");
         }
 
         if (link->network->dhcp_server_default_lease_time_usec > 0) {
-                r = sd_dhcp_server_set_default_lease_time(link->dhcp_server,
-                                                          DIV_ROUND_UP(link->network->dhcp_server_default_lease_time_usec, USEC_PER_SEC));
+                r = sd_dhcp_server_set_default_lease_time(link->dhcp_server, link->network->dhcp_server_default_lease_time_usec);
                 if (r < 0)
                         return log_link_error_errno(link, r, "Failed to set default lease time for DHCPv4 server instance: %m");
         }
+
+        r = sd_dhcp_server_set_ipv6_only_preferred_usec(link->dhcp_server, link->network->dhcp_server_ipv6_only_preferred_usec);
+        if (r < 0)
+                return log_link_error_errno(link, r, "Failed to set IPv6 only preferred time for DHCPv4 server instance: %m");
 
         r = sd_dhcp_server_set_boot_server_address(link->dhcp_server, &link->network->dhcp_server_boot_server_address);
         if (r < 0)
@@ -726,5 +728,47 @@ int config_parse_dhcp_server_address(
 
         network->dhcp_server_address_in_addr = a.in;
         network->dhcp_server_address_prefixlen = prefixlen;
+        return 0;
+}
+
+int config_parse_dhcp_server_ipv6_only_preferred(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        usec_t t, *usec = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(section);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *usec = 0;
+                return 0;
+        }
+
+        r = parse_sec(rvalue, &t);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Failed to parse [%s] %s=, ignoring assignment: %s", section, lvalue, rvalue);
+                return 0;
+        }
+
+        if (t < MIN_V6ONLY_WAIT_USEC && !network_test_mode_enabled()) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Invalid [%s] %s=, ignoring assignment: %s", section, lvalue, rvalue);
+                return 0;
+        }
+
+        *usec = t;
         return 0;
 }

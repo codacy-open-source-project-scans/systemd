@@ -209,8 +209,6 @@ int network_verify(Network *network) {
                                 else
                                         continue;
 
-                                assert(m);
-
                                 if (m->mode == NETDEV_MACVLAN_MODE_PASSTHRU)
                                         network->link_local = ADDRESS_FAMILY_NO;
 
@@ -402,6 +400,7 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
                 .dhcp_route_table = RT_TABLE_MAIN,
                 .dhcp_ip_service_type = -1,
                 .dhcp_broadcast = -1,
+                .dhcp_ipv6_only_mode = -1,
 
                 .dhcp6_use_address = true,
                 .dhcp6_use_pd_prefix = true,

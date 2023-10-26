@@ -145,6 +145,7 @@ typedef enum ManagerTestRunFlags {
         MANAGER_TEST_RUN_ENV_GENERATORS      = 1 << 2,  /* also run env generators  */
         MANAGER_TEST_RUN_GENERATORS          = 1 << 3,  /* also run unit generators */
         MANAGER_TEST_RUN_IGNORE_DEPENDENCIES = 1 << 4,  /* run while ignoring dependencies */
+        MANAGER_TEST_DONT_OPEN_EXECUTOR      = 1 << 5,  /* avoid trying to load sd-executor */
         MANAGER_TEST_FULL = MANAGER_TEST_RUN_BASIC | MANAGER_TEST_RUN_ENV_GENERATORS | MANAGER_TEST_RUN_GENERATORS,
 } ManagerTestRunFlags;
 
@@ -167,7 +168,7 @@ typedef struct UnitDefaults {
         bool tasks_accounting;
         bool ip_accounting;
 
-        TasksMax tasks_max;
+        CGroupTasksMax tasks_max;
         usec_t timer_accuracy_usec;
 
         OOMPolicy oom_policy;
@@ -242,14 +243,15 @@ struct Manager {
 
         sd_event *event;
 
-        /* This maps PIDs we care about to units that are interested in. We allow multiple units to be interested in
-         * the same PID and multiple PIDs to be relevant to the same unit. Since in most cases only a single unit will
-         * be interested in the same PID we use a somewhat special encoding here: the first unit interested in a PID is
-         * stored directly in the hashmap, keyed by the PID unmodified. If there are other units interested too they'll
-         * be stored in a NULL-terminated array, and keyed by the negative PID. This is safe as pid_t is signed and
-         * negative PIDs are not used for regular processes but process groups, which we don't care about in this
-         * context, but this allows us to use the negative range for our own purposes. */
-        Hashmap *watch_pids;  /* pid => unit as well as -pid => array of units */
+        /* This maps PIDs we care about to units that are interested in them. We allow multiple units to be
+         * interested in the same PID and multiple PIDs to be relevant to the same unit. Since in most cases
+         * only a single unit will be interested in the same PID though, we use a somewhat special structure
+         * here: the first unit interested in a PID is stored in the hashmap 'watch_pids', keyed by the
+         * PID. If there are other units interested too they'll be stored in a NULL-terminated array, stored
+         * in the hashmap 'watch_pids_more', keyed by the PID. Thus to go through the full list of units
+         * interested in a PID we must look into both hashmaps. */
+        Hashmap *watch_pids;            /* PidRef* → Unit* */
+        Hashmap *watch_pids_more;       /* PidRef* → NUL terminated array of Unit* */
 
         /* A set contains all units which cgroup should be refreshed after startup */
         Set *startup_units;
@@ -287,6 +289,12 @@ struct Manager {
         Hashmap *unit_name_map;
         Set *unit_path_cache;
         uint64_t unit_cache_timestamp_hash;
+
+        /* We don't have support for atomically enabling/disabling units, and unit_file_state might become
+         * outdated if such operations failed half-way. Therefore, we set this flag if changes to unit files
+         * are made, and reset it after daemon-reload. If set, we report that daemon-reload is needed through
+         * unit's NeedDaemonReload property. */
+        bool unit_file_state_outdated;
 
         char **transient_environment;  /* The environment, as determined from config files, kernel cmdline and environment generators */
         char **client_environment;     /* Environment variables created by clients through the bus API */
@@ -486,6 +494,13 @@ struct Manager {
         RateLimit dump_ratelimit;
 
         sd_event_source *memory_pressure_event_source;
+
+        /* For NFTSet= */
+        FirewallContext *fw_ctx;
+
+        /* Pin the systemd-executor binary, so that it never changes until re-exec, ensuring we don't have
+         * serialization/deserialization compatibility issues during upgrades. */
+        int executor_fd;
 };
 
 static inline usec_t manager_default_timeout_abort_usec(Manager *m) {
@@ -535,7 +550,7 @@ int manager_propagate_reload(Manager *m, Unit *unit, JobMode mode, sd_bus_error 
 
 void manager_clear_jobs(Manager *m);
 
-void manager_unwatch_pid(Manager *m, pid_t pid);
+void manager_unwatch_pidref(Manager *m, PidRef *pid);
 
 unsigned manager_dispatch_load_queue(Manager *m);
 
@@ -577,6 +592,8 @@ void manager_override_show_status(Manager *m, ShowStatus mode, const char *reaso
 void manager_set_first_boot(Manager *m, bool b);
 void manager_set_switching_root(Manager *m, bool switching_root);
 
+double manager_get_progress(Manager *m);
+
 void manager_status_printf(Manager *m, StatusType type, const char *status, const char *format, ...) _printf_(4,5);
 
 Set *manager_get_units_requiring_mounts_for(Manager *m, const char *path);
@@ -606,7 +623,6 @@ const char *manager_state_to_string(ManagerState m) _const_;
 ManagerState manager_state_from_string(const char *s) _pure_;
 
 const char *manager_get_confirm_spawn(Manager *m);
-bool manager_is_confirm_spawn_disabled(Manager *m);
 void manager_disable_confirm_spawn(void);
 
 const char *manager_timestamp_to_string(ManagerTimestamp m) _const_;
@@ -618,6 +634,10 @@ void manager_set_watchdog(Manager *m, WatchdogType t, usec_t timeout);
 void manager_override_watchdog(Manager *m, WatchdogType t, usec_t timeout);
 int manager_set_watchdog_pretimeout_governor(Manager *m, const char *governor);
 int manager_override_watchdog_pretimeout_governor(Manager *m, const char *governor);
+
+LogTarget manager_get_executor_log_target(Manager *m);
+
+int manager_allocate_idle_pipe(Manager *m);
 
 const char* oom_policy_to_string(OOMPolicy i) _const_;
 OOMPolicy oom_policy_from_string(const char *s) _pure_;

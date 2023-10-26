@@ -27,7 +27,6 @@ executables += [
                 'public' : true,
                 'conditions' : [
                           'HAVE_BLKID',
-                          'ENABLE_BOOTLOADER',
                 ],
                 'sources' : bootctl_sources,
                 'link_with' : boot_link_with,
@@ -57,27 +56,11 @@ executables += [
                 'name' : 'systemd-measure',
                 'conditions' : [
                         'HAVE_BLKID',
-                        'ENABLE_BOOTLOADER',
                         'HAVE_OPENSSL',
                         'HAVE_TPM2',
                 ],
                 'sources' : files('measure.c'),
                 'dependencies' : libopenssl,
-        },
-        libexec_template + {
-                'name' : 'systemd-pcrphase',
-                'conditions' : [
-                        'HAVE_BLKID',
-                        'ENABLE_BOOTLOADER',
-                        'HAVE_OPENSSL',
-                        'HAVE_TPM2',
-                ],
-                'sources' : files('pcrphase.c'),
-                'dependencies' : [
-                        libblkid,
-                        libopenssl,
-                        tpm2,
-                ],
         },
         libexec_template + {
                 'name' : 'systemd-boot-check-no-failures',

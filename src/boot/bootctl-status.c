@@ -273,15 +273,13 @@ static int status_binaries(const char *esp_path, sd_id128_t partition) {
         printf("\n");
 
         r = enumerate_binaries(esp_path, "EFI/systemd", NULL, &last, &is_first);
-        if (r < 0) {
-                printf("\n");
-                return r;
-        }
+        if (r < 0)
+                goto fail;
 
         k = enumerate_binaries(esp_path, "EFI/BOOT", "boot", &last, &is_first);
         if (k < 0) {
-                printf("\n");
-                return k;
+                r = k;
+                goto fail;
         }
 
         if (last) /* let's output the last entry now, since now we know that there will be no more, and can draw the tree glyph properly */
@@ -296,6 +294,11 @@ static int status_binaries(const char *esp_path, sd_id128_t partition) {
 
         printf("\n");
         return 0;
+
+fail:
+        errno = -r;
+        printf("         File: (can't access %s: %m)\n\n", esp_path);
+        return r;
 }
 
 static void read_efi_var(const char *variable, char **ret) {
@@ -369,6 +372,7 @@ int verb_status(int argc, char *argv[], void *userdata) {
                         { EFI_LOADER_FEATURE_DEVICETREE,              "Support Type #1 devicetree field"      },
                         { EFI_LOADER_FEATURE_SECUREBOOT_ENROLL,       "Enroll SecureBoot keys"                },
                         { EFI_LOADER_FEATURE_RETAIN_SHIM,             "Retain SHIM protocols"                 },
+                        { EFI_LOADER_FEATURE_MENU_DISABLE,            "Menu can be disabled"                  },
                 };
                 static const struct {
                         uint64_t flag;
@@ -381,6 +385,7 @@ int verb_status(int argc, char *argv[], void *userdata) {
                         { EFI_STUB_FEATURE_RANDOM_SEED,               "Support for passing random seed to OS"                },
                         { EFI_STUB_FEATURE_CMDLINE_ADDONS,            "Pick up .cmdline from addons"                         },
                         { EFI_STUB_FEATURE_CMDLINE_SMBIOS,            "Pick up .cmdline from SMBIOS Type 11"                 },
+                        { EFI_STUB_FEATURE_DEVICETREE_ADDONS,         "Pick up .dtb from addons"                             },
                 };
                 _cleanup_free_ char *fw_type = NULL, *fw_info = NULL, *loader = NULL, *loader_path = NULL, *stub = NULL;
                 sd_id128_t loader_part_uuid = SD_ID128_NULL;
@@ -407,9 +412,15 @@ int verb_status(int argc, char *argv[], void *userdata) {
                 printf("%sSystem:%s\n", ansi_underline(), ansi_normal());
                 printf("      Firmware: %s%s (%s)%s\n", ansi_highlight(), strna(fw_type), strna(fw_info), ansi_normal());
                 printf(" Firmware Arch: %s\n", get_efi_arch());
-                printf("   Secure Boot: %sd (%s)\n",
-                       enable_disable(IN_SET(secure, SECURE_BOOT_USER, SECURE_BOOT_DEPLOYED)),
-                       secure_boot_mode_to_string(secure));
+                printf("   Secure Boot: %s%s%s",
+                       IN_SET(secure, SECURE_BOOT_USER, SECURE_BOOT_DEPLOYED) ? ansi_highlight_green() : ansi_normal(),
+                       enabled_disabled(IN_SET(secure, SECURE_BOOT_USER, SECURE_BOOT_DEPLOYED)),
+                       ansi_normal());
+
+                if (secure != SECURE_BOOT_DISABLED)
+                        printf(" (%s)\n", secure_boot_mode_to_string(secure));
+                else
+                        printf("\n");
 
                 s = tpm2_support();
                 printf("  TPM2 Support: %s%s%s\n",
@@ -419,6 +430,16 @@ int verb_status(int argc, char *argv[], void *userdata) {
                        (s & TPM2_SUPPORT_FIRMWARE) ? "firmware only, driver unavailable" :
                        (s & TPM2_SUPPORT_DRIVER) ? "driver only, firmware unavailable" : "no",
                        ansi_normal());
+
+                k = efi_measured_uki(LOG_DEBUG);
+                if (k > 0)
+                        printf("  Measured UKI: %syes%s\n", ansi_highlight_green(), ansi_normal());
+                else if (k == 0)
+                        printf("  Measured UKI: no\n");
+                else {
+                        errno = -k;
+                        printf("  Measured UKI: %sfailed%s (%m)\n", ansi_highlight_red(), ansi_normal());
+                }
 
                 k = efi_get_reboot_to_firmware();
                 if (k > 0)

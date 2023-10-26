@@ -52,6 +52,7 @@
 #include "networkd-nexthop.h"
 #include "networkd-queue.h"
 #include "networkd-radv.h"
+#include "networkd-route-util.h"
 #include "networkd-route.h"
 #include "networkd-routing-policy-rule.h"
 #include "networkd-setlink.h"
@@ -92,6 +93,32 @@ bool link_ipv6_enabled(Link *link) {
                 return true;
 
         return false;
+}
+
+bool link_has_ipv6_connectivity(Link *link) {
+        LinkAddressState ipv6_address_state;
+
+        assert(link);
+
+        link_get_address_states(link, NULL, &ipv6_address_state, NULL);
+
+        switch (ipv6_address_state) {
+        case LINK_ADDRESS_STATE_ROUTABLE:
+                /* If the interface has a routable IPv6 address, then we assume yes. */
+                return true;
+
+        case LINK_ADDRESS_STATE_DEGRADED:
+                /* If the interface has only degraded IPv6 address (mostly, link-local address), then let's check
+                 * there is an IPv6 default gateway. */
+                return link_has_default_gateway(link, AF_INET6);
+
+        case LINK_ADDRESS_STATE_OFF:
+                /* No IPv6 address. */
+                return false;
+
+        default:
+                assert_not_reached();
+        }
 }
 
 static bool link_is_ready_to_configure_one(Link *link, bool allow_unmanaged) {
@@ -485,7 +512,7 @@ void link_check_ready(Link *link) {
                 }
 
                 if (link_dhcp6_enabled(link) && link->network->dhcp6_use_pd_prefix &&
-                    link->dhcp6_lease && dhcp6_lease_has_pd_prefix(link->dhcp6_lease)) {
+                    sd_dhcp6_lease_has_pd_prefix(link->dhcp6_lease)) {
                         if (!dhcp6_ready)
                                 return (void) log_link_debug(link, "%s(): DHCPv6 IA_PD prefix is assigned, but DHCPv6 protocol is not finished yet.", __func__);
                         if (!dhcp_pd_ready)
@@ -1687,28 +1714,13 @@ static bool link_is_enslaved(Link *link) {
         return false;
 }
 
-static LinkAddressState address_state_from_scope(uint8_t scope) {
-        if (scope < RT_SCOPE_SITE)
-                /* universally accessible addresses found */
-                return LINK_ADDRESS_STATE_ROUTABLE;
-
-        if (scope < RT_SCOPE_HOST)
-                /* only link or site local addresses found */
-                return LINK_ADDRESS_STATE_DEGRADED;
-
-        /* no useful addresses found */
-        return LINK_ADDRESS_STATE_OFF;
-}
-
 void link_update_operstate(Link *link, bool also_update_master) {
         LinkOperationalState operstate;
         LinkCarrierState carrier_state;
         LinkAddressState ipv4_address_state, ipv6_address_state, address_state;
         LinkOnlineState online_state;
         _cleanup_strv_free_ char **p = NULL;
-        uint8_t ipv4_scope = RT_SCOPE_NOWHERE, ipv6_scope = RT_SCOPE_NOWHERE;
         bool changed = false;
-        Address *address;
 
         assert(link);
 
@@ -1735,20 +1747,7 @@ void link_update_operstate(Link *link, bool also_update_master) {
                 }
         }
 
-        SET_FOREACH(address, link->addresses) {
-                if (!address_is_ready(address))
-                        continue;
-
-                if (address->family == AF_INET)
-                        ipv4_scope = MIN(ipv4_scope, address->scope);
-
-                if (address->family == AF_INET6)
-                        ipv6_scope = MIN(ipv6_scope, address->scope);
-        }
-
-        ipv4_address_state = address_state_from_scope(ipv4_scope);
-        ipv6_address_state = address_state_from_scope(ipv6_scope);
-        address_state = address_state_from_scope(MIN(ipv4_scope, ipv6_scope));
+        link_get_address_states(link, &ipv4_address_state, &ipv6_address_state, &address_state);
 
         /* Mapping of address and carrier state vs operational state
          *                                                     carrier state

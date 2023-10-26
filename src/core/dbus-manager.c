@@ -67,6 +67,7 @@ static BUS_DEFINE_PROPERTY_GET(property_get_default_timeout_abort_usec, "t", Man
 static BUS_DEFINE_PROPERTY_GET_GLOBAL(property_get_watchdog_device, "s", watchdog_get_device());
 static BUS_DEFINE_PROPERTY_GET_GLOBAL(property_get_watchdog_last_ping_realtime, "t", watchdog_get_last_ping(CLOCK_REALTIME));
 static BUS_DEFINE_PROPERTY_GET_GLOBAL(property_get_watchdog_last_ping_monotonic, "t", watchdog_get_last_ping(CLOCK_MONOTONIC));
+static BUS_DEFINE_PROPERTY_GET(property_get_progress, "d", Manager, manager_get_progress);
 
 static int property_get_virtualization(
                 sd_bus *bus,
@@ -205,29 +206,6 @@ static int property_set_log_level(
         }
 
         return 0;
-}
-
-static int property_get_progress(
-                sd_bus *bus,
-                const char *path,
-                const char *interface,
-                const char *property,
-                sd_bus_message *reply,
-                void *userdata,
-                sd_bus_error *error) {
-
-        Manager *m = ASSERT_PTR(userdata);
-        double d;
-
-        assert(bus);
-        assert(reply);
-
-        if (MANAGER_IS_FINISHED(m))
-                d = 1.0;
-        else
-                d = 1.0 - ((double) hashmap_size(m->jobs) / (double) m->n_installed_jobs);
-
-        return sd_bus_message_append(reply, "d", d);
 }
 
 static int property_get_environment(
@@ -679,10 +657,10 @@ static int method_get_unit_by_control_group(sd_bus_message *message, void *userd
 
 static int method_get_unit_by_pidfd(sd_bus_message *message, void *userdata, sd_bus_error *error) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        _cleanup_(pidref_done) PidRef pidref = PIDREF_NULL;
         Manager *m = ASSERT_PTR(userdata);
         _cleanup_free_ char *path = NULL;
         int r, pidfd;
-        pid_t pid;
         Unit *u;
 
         assert(message);
@@ -691,13 +669,13 @@ static int method_get_unit_by_pidfd(sd_bus_message *message, void *userdata, sd_
         if (r < 0)
                 return r;
 
-        r = pidfd_get_pid(pidfd, &pid);
+        r = pidref_set_pidfd(&pidref, pidfd);
         if (r < 0)
                 return sd_bus_error_set_errnof(error, r, "Failed to get PID from PIDFD: %m");
 
-        u = manager_get_unit_by_pid(m, pid);
+        u = manager_get_unit_by_pidref(m, &pidref);
         if (!u)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_UNIT_FOR_PID, "PID "PID_FMT" does not belong to any loaded unit.", pid);
+                return sd_bus_error_setf(error, BUS_ERROR_NO_UNIT_FOR_PID, "PID "PID_FMT" does not belong to any loaded unit.", pidref.pid);
 
         r = mac_selinux_unit_access_check(u, message, "status", error);
         if (r < 0)
@@ -721,12 +699,12 @@ static int method_get_unit_by_pidfd(sd_bus_message *message, void *userdata, sd_
 
         /* Double-check that the process is still alive and that the PID did not change before returning the
          * answer. */
-        r = pidfd_verify_pid(pidfd, pid);
+        r = pidref_verify(&pidref);
         if (r == -ESRCH)
                 return sd_bus_error_setf(error,
                                          BUS_ERROR_NO_SUCH_PROCESS,
                                          "The PIDFD's PID "PID_FMT" changed during the lookup operation.",
-                                         pid);
+                                         pidref.pid);
         if (r < 0)
                 return sd_bus_error_set_errnof(error, r, "Failed to get PID from PIDFD: %m");
 
@@ -2543,6 +2521,7 @@ static int method_enable_unit_files_generic(
                 return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
 
         r = call(m->runtime_scope, flags, NULL, l, &changes, &n_changes);
+        m->unit_file_state_outdated = m->unit_file_state_outdated || n_changes > 0; /* See comments for this variable in manager.h */
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
@@ -2615,6 +2594,7 @@ static int method_preset_unit_files_with_mode(sd_bus_message *message, void *use
                 return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
 
         r = unit_file_preset(m->runtime_scope, flags, NULL, l, preset_mode, &changes, &n_changes);
+        m->unit_file_state_outdated = m->unit_file_state_outdated || n_changes > 0; /* See comments for this variable in manager.h */
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
@@ -2668,6 +2648,7 @@ static int method_disable_unit_files_generic(
                 return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
 
         r = call(m->runtime_scope, flags, NULL, l, &changes, &n_changes);
+        m->unit_file_state_outdated = m->unit_file_state_outdated || n_changes > 0; /* See comments for this variable in manager.h */
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
@@ -2710,6 +2691,7 @@ static int method_revert_unit_files(sd_bus_message *message, void *userdata, sd_
                 return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
 
         r = unit_file_revert(m->runtime_scope, NULL, l, &changes, &n_changes);
+        m->unit_file_state_outdated = m->unit_file_state_outdated || n_changes > 0; /* See comments for this variable in manager.h */
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
@@ -2782,6 +2764,7 @@ static int method_preset_all_unit_files(sd_bus_message *message, void *userdata,
                 return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
 
         r = unit_file_preset_all(m->runtime_scope, flags, NULL, preset_mode, &changes, &n_changes);
+        m->unit_file_state_outdated = m->unit_file_state_outdated || n_changes > 0; /* See comments for this variable in manager.h */
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
@@ -2821,6 +2804,7 @@ static int method_add_dependency_unit_files(sd_bus_message *message, void *userd
                 return -EINVAL;
 
         r = unit_file_add_dependency(m->runtime_scope, flags, NULL, l, target, dep, &changes, &n_changes);
+        m->unit_file_state_outdated = m->unit_file_state_outdated || n_changes > 0; /* See comments for this variable in manager.h */
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 

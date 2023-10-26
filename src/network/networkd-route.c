@@ -889,14 +889,13 @@ static bool route_by_kernel(const Route *route) {
 }
 
 static void link_unmark_wireguard_routes(Link *link) {
-        Route *route, *existing;
-        Wireguard *w;
-
         assert(link);
 
-        w = WIREGUARD(link->netdev);
-        if (!w)
+        if (!link->netdev || link->netdev->kind != NETDEV_KIND_WIREGUARD)
                 return;
+
+        Route *route, *existing;
+        Wireguard *w = WIREGUARD(link->netdev);
 
         SET_FOREACH(route, w->routes)
                 if (route_get(NULL, link, route, &existing) >= 0)
@@ -1527,7 +1526,6 @@ static int link_request_static_route(Link *link, Route *route) {
 
 static int link_request_wireguard_routes(Link *link, bool only_ipv4) {
         NetDev *netdev;
-        Wireguard *w;
         Route *route;
         int r;
 
@@ -1539,9 +1537,7 @@ static int link_request_wireguard_routes(Link *link, bool only_ipv4) {
         if (netdev_get(link->manager, link->ifname, &netdev) < 0)
                 return 0;
 
-        w = WIREGUARD(netdev);
-        if (!w)
-                return 0;
+        Wireguard *w = WIREGUARD(netdev);
 
         SET_FOREACH(route, w->routes) {
                 if (only_ipv4 && route->family != AF_INET)
@@ -1624,6 +1620,7 @@ static int process_route_one(
 
         _cleanup_(route_freep) Route *tmp = in;
         Route *route = NULL;
+        bool update_dhcp4;
         int r;
 
         assert(manager);
@@ -1631,6 +1628,8 @@ static int process_route_one(
         assert(IN_SET(type, RTM_NEWROUTE, RTM_DELROUTE));
 
         /* link may be NULL. This consumes 'in'. */
+
+        update_dhcp4 = link && tmp->family == AF_INET6 && tmp->dst_prefixlen == 0;
 
         (void) route_get(manager, link, tmp, &route);
 
@@ -1682,6 +1681,14 @@ static int process_route_one(
 
         default:
                 assert_not_reached();
+        }
+
+        if (update_dhcp4) {
+                r = dhcp4_update_ipv6_connectivity(link);
+                if (r < 0) {
+                        log_link_warning_errno(link, r, "Failed to notify IPv6 connectivity to DHCPv4 client: %m");
+                        link_enter_failed(link);
+                }
         }
 
         return 1;

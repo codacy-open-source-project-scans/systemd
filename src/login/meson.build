@@ -112,7 +112,7 @@ modules += [
                         'HAVE_PAM',
                 ],
                 'sources' : files('pam_systemd.c'),
-                'link_depends' : files('pam_systemd.sym'),
+                'version-script' : meson.current_source_dir() / 'pam_systemd.sym',
         },
 ]
 
@@ -124,7 +124,7 @@ custom_target(
         output : 'logind.conf',
         command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
         install : enable_logind and install_sysconfdir_samples and pkgsysconfdir != 'no',
-        install_dir : pkgsysconfdir)
+        install_dir : pkgconfigfiledir)
 
 custom_target(
         'systemd-user',

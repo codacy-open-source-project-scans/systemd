@@ -350,7 +350,7 @@
         the service with a private, minimal version of <filename>/dev/</filename>, combine this option with
         <varname>PrivateDevices=</varname>.</para>
 
-        <para>In order to allow propagating mounts at runtime in a safe manner, <filename>/run/systemd/propagate</filename>
+        <para>In order to allow propagating mounts at runtime in a safe manner, <filename>/run/systemd/propagate/</filename>
         on the host will be used to set up new mounts, and <filename>/run/host/incoming/</filename> in the private namespace
         will be used as an intermediate step to store them before being moved to the final mount point.</para>
 
@@ -694,6 +694,19 @@
         all assignments prior to this one will have no effect. In any way, this option does not override, but extends
         the list of supplementary groups configured in the system group database for the user. This does not affect
         commands prefixed with <literal>+</literal>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>SetLoginEnvironment=</varname></term>
+
+        <listitem><para>Takes a boolean parameter that controls whether to set <varname>$HOME</varname>,
+        <varname>$LOGNAME</varname>, and <varname>$SHELL</varname> environment variables. If unset, this is
+        controlled by whether <varname>User=</varname> is set. If true, they will always be set for system services,
+        i.e. even when the default user <literal>root</literal> is used. If false, the mentioned variables are not set
+        by systemd, no matter whether <varname>User=</varname> is used or not. This option normally has no effect
+        on user services, since these variables are typically inherited from user manager's own environment anyway.</para>
+
+        <xi:include href="version-info.xml" xpointer="v255"/></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -1659,12 +1672,15 @@ StateDirectory=aaa/bbb ccc</programlisting>
         i.e. writable mounts appearing on the host will be writable in the unit's namespace too, even when propagated
         below a path marked with <varname>ReadOnlyPaths=</varname>! Restricting access with these options hence does
         not extend to submounts of a directory that are created later on. This means the lock-down offered by that
-        setting is not complete, and does not offer full protection. </para>
+        setting is not complete, and does not offer full protection.</para>
 
         <para>Note that the effect of these settings may be undone by privileged processes. In order to set up an
         effective sandboxed environment for a unit it is thus recommended to combine these settings with either
-        <varname>CapabilityBoundingSet=~CAP_SYS_ADMIN</varname> or
-        <varname>SystemCallFilter=~@mount</varname>.</para>
+        <varname>CapabilityBoundingSet=~CAP_SYS_ADMIN</varname> or <varname>SystemCallFilter=~@mount</varname>.</para>
+
+        <para>Please be extra careful when applying these options to API file systems (a list of them could be
+        found in <varname>MountAPIVPS=</varname>), since they may be required for basic system functionalities.
+        Moreover, <filename>/run/</filename> needs to be writable for setting up mount namespace and propagation.</para>
 
         <para>Simple allow-list example using these directives:
         <programlisting>[Service]
@@ -3414,7 +3430,12 @@ StandardInputData=V2XigLJyZSBubyBzdHJhbmdlcnMgdG8gbG92ZQpZb3Uga25vdyB0aGUgcnVsZX
         <varname>ExecStart=</varname> command line use <literal>${CREDENTIALS_DIRECTORY}/mycred</literal>,
         e.g. <literal>ExecStart=cat ${CREDENTIALS_DIRECTORY}/mycred</literal>. In order to reference the path
         a credential may be read from within a <varname>Environment=</varname> line use
-        <literal>%d/mycred</literal>, e.g. <literal>Environment=MYCREDPATH=%d/mycred</literal>.</para>
+        <literal>%d/mycred</literal>, e.g. <literal>Environment=MYCREDPATH=%d/mycred</literal>. For system
+        services the path may also be referenced as
+        <literal>/run/credentials/<replaceable>UNITNAME</replaceable></literal> in cases where no
+        interpolation is possible, e.g. configuration files of software that does not yet support credentials
+        natively. <varname>$CREDENTIALS_DIRECTORY</varname> is considered the primary interface to look for
+        credentials, though, since it also works for user services.</para>
 
         <para>Currently, an accumulated credential size limit of 1 MB per unit is enforced.</para>
 
@@ -3658,10 +3679,10 @@ StandardInputData=V2XigLJyZSBubyBzdHJhbmdlcnMgdG8gbG92ZQpZb3Uga25vdyB0aGUgcnVsZX
           <term><varname>$HOME</varname></term>
           <term><varname>$SHELL</varname></term>
 
-          <listitem><para>User name (twice), home directory, and the
-          login shell. The variables are set for the units that have
-          <varname>User=</varname> set, which includes user
-          <command>systemd</command> instances. See
+          <listitem><para>User name (twice), home directory, and the login shell. <varname>$USER</varname> is
+          set unconditionally, while <varname>$HOME</varname>, <varname>$LOGNAME</varname>, and <varname>$SHELL</varname>
+          are only set for the units that have <varname>User=</varname> set and <varname>SetLoginEnvironment=</varname>
+          unset or set to true. For user services, these variables are typically inherited from the user manager itself. See
           <citerefentry project='die-net'><refentrytitle>passwd</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
           </para>
 
@@ -3883,6 +3904,14 @@ StandardInputData=V2XigLJyZSBubyBzdHJhbmdlcnMgdG8gbG92ZQpZb3Uga25vdyB0aGUgcnVsZX
                 <row>
                   <entry><literal>watchdog</literal></entry>
                   <entry>Watchdog keep-alive ping was enabled for the service, but the deadline was missed.</entry>
+                </row>
+                <row>
+                  <entry><literal>exec-condition</literal></entry>
+                  <entry>Service did not run because <varname>ExecCondition=</varname> failed.</entry>
+                </row>
+                <row>
+                  <entry><literal>oom-kill</literal></entry>
+                  <entry>A service process was terminated by the Out-Of-Memory (OOM) killer.</entry>
                 </row>
                 <row>
                   <entry><literal>start-limit-hit</literal></entry>

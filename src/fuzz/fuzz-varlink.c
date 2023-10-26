@@ -6,7 +6,7 @@
 #include "fd-util.h"
 #include "fuzz.h"
 #include "hexdecoct.h"
-#include "io-util.h"
+#include "iovec-util.h"
 #include "varlink.h"
 #include "log.h"
 
@@ -41,7 +41,7 @@ static int io_callback(sd_event_source *s, int fd, uint32_t revents, void *userd
                         else
                                 assert_se(errno == EAGAIN);
                 } else
-                        IOVEC_INCREMENT(iov, 1, n);
+                        iovec_increment(iov, 1, n);
         }
 
         if (revents & EPOLLIN) {
@@ -92,8 +92,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         _cleanup_(varlink_flush_close_unrefp) Varlink *c = NULL;
         _cleanup_(sd_event_unrefp) sd_event *e = NULL;
 
-        log_set_max_level(LOG_CRIT);
-        log_parse_environment();
+        fuzz_setup_logging();
 
         assert_se(null = fopen("/dev/null", "we"));
 

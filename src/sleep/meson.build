@@ -3,11 +3,20 @@
 executables += [
         libexec_template + {
                 'name' : 'systemd-sleep',
-                'sources' : files('sleep.c'),
+                'sources' : files(
+                        'sleep.c',
+                        'battery-capacity.c',
+                ),
+        },
+        test_template + {
+                'sources' : files(
+                        'test-battery-capacity.c',
+                        'battery-capacity.c',
+                ),
         },
 ]
 
 if install_sysconfdir_samples
         install_data('sleep.conf',
-                     install_dir : pkgsysconfdir)
+                     install_dir : pkgconfigfiledir)
 endif

@@ -250,7 +250,7 @@ DEFAULT_SECTIONS_TO_SHOW = {
         '.linux'    : 'binary',
         '.initrd'   : 'binary',
         '.splash'   : 'binary',
-        '.dt'       : 'binary',
+        '.dtb'      : 'binary',
         '.cmdline'  : 'text',
         '.osrel'    : 'text',
         '.uname'    : 'text',
@@ -858,7 +858,8 @@ def generate_key_cert_pair(
 ) -> tuple[bytes]:
 
     from cryptography import x509
-    import cryptography.hazmat.primitives as hp
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
 
     # We use a keylength of 2048 bits. That is what Microsoft documents as
     # supported/expected:
@@ -866,7 +867,7 @@ def generate_key_cert_pair(
 
     now = datetime.datetime.utcnow()
 
-    key = hp.asymmetric.rsa.generate_private_key(
+    key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=keylength,
     )
@@ -888,36 +889,37 @@ def generate_key_cert_pair(
         critical=True,
     ).sign(
         private_key=key,
-        algorithm=hp.hashes.SHA256(),
+        algorithm=hashes.SHA256(),
     )
 
     cert_pem = cert.public_bytes(
-        encoding=hp.serialization.Encoding.PEM,
+        encoding=serialization.Encoding.PEM,
     )
     key_pem = key.private_bytes(
-        encoding=hp.serialization.Encoding.PEM,
-        format=hp.serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=hp.serialization.NoEncryption(),
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
     )
 
     return key_pem, cert_pem
 
 
 def generate_priv_pub_key_pair(keylength : int = 2048) -> tuple[bytes]:
-    import cryptography.hazmat.primitives as hp
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
 
-    key = hp.asymmetric.rsa.generate_private_key(
+    key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=keylength,
     )
     priv_key_pem = key.private_bytes(
-        encoding=hp.serialization.Encoding.PEM,
-        format=hp.serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=hp.serialization.NoEncryption(),
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
     )
     pub_key_pem = key.public_key().public_bytes(
-        encoding=hp.serialization.Encoding.PEM,
-        format=hp.serialization.PublicFormat.SubjectPublicKeyInfo,
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
 
     return priv_key_pem, pub_key_pem
@@ -1523,7 +1525,7 @@ def finalize_options(opts):
     elif opts.linux or opts.initrd:
         raise ValueError('--linux/--initrd options cannot be used with positional arguments')
     else:
-        print("Assuming obsolete commandline syntax with no verb. Please use 'build'.")
+        print("Assuming obsolete command line syntax with no verb. Please use 'build'.")
         if opts.positional:
             opts.linux = pathlib.Path(opts.positional[0])
         # If we have initrds from parsing config files, append our positional args at the end
@@ -1543,8 +1545,8 @@ def finalize_options(opts):
     if opts.cmdline and opts.cmdline.startswith('@'):
         opts.cmdline = pathlib.Path(opts.cmdline[1:])
     elif opts.cmdline:
-        # Drop whitespace from the commandline. If we're reading from a file,
-        # we copy the contents verbatim. But configuration specified on the commandline
+        # Drop whitespace from the command line. If we're reading from a file,
+        # we copy the contents verbatim. But configuration specified on the command line
         # or in the config file may contain additional whitespace that has no meaning.
         opts.cmdline = ' '.join(opts.cmdline.split())
 

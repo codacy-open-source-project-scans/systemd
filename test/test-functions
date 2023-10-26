@@ -169,10 +169,12 @@ BASICTOOLS=(
     echo
     env
     false
+    findmnt
     flock
     getconf
     getent
     getfacl
+    getfattr
     grep
     gunzip
     gzip
@@ -187,6 +189,7 @@ BASICTOOLS=(
     login
     losetup
     lsattr
+    lsblk
     lz4cat
     mkfifo
     mknod
@@ -379,7 +382,12 @@ qemu_setup_swtpm_socket() {
     swtpm socket --tpm2 --tpmstate dir="$state_dir" --ctrl type=unixio,path="$state_dir/sock" &
     pid=$!
     if ! kill -0 "$pid"; then
-        echo >&2 "Failed to setup swtpm socket"
+        derror "Failed to start swtpm"
+        return 1
+    fi
+
+    if ! timeout 5 bash -c "until [[ -S $state_dir/sock ]]; do sleep .5; done"; then
+        derror "Failed to setup swtpm socket"
         return 1
     fi
 
@@ -555,15 +563,14 @@ run_qemu() {
         "systemd.unit=testsuite.target"
         "systemd.wants=testsuite-$1.service"
         "noresume"
+        "oops=panic"
         ${TEST_MATCH_SUBTEST:+"systemd.setenv=TEST_MATCH_SUBTEST=$TEST_MATCH_SUBTEST"}
         ${TEST_MATCH_TESTCASE:+"systemd.setenv=TEST_MATCH_TESTCASE=$TEST_MATCH_TESTCASE"}
     )
 
-    if ! get_bool "$INTERACTIVE_DEBUG"; then
+    if ! get_bool "$INTERACTIVE_DEBUG" && ! get_bool "$TEST_SKIP_SHUTDOWN"; then
         kernel_params+=(
-            "oops=panic"
             "panic=1"
-            "softlockup_panic=1"
             "systemd.wants=end.service"
         )
     fi
@@ -661,7 +668,7 @@ run_nspawn() {
 
     if get_bool "$INTERACTIVE_DEBUG"; then
         nspawn_options+=("--console=interactive")
-    else
+    elif ! get_bool "$TEST_SKIP_SHUTDOWN"; then
         kernel_params+=("systemd.wants=end.service")
     fi
 
@@ -1115,7 +1122,7 @@ install_modules() {
     instmods scsi_debug
 
     if get_bool "$LOOKS_LIKE_SUSE"; then
-        instmods ext4
+        instmods ext4 af_packet
     fi
 }
 
@@ -1377,6 +1384,9 @@ install_systemd() {
     if [[ -n "$TEST_SYSTEMD_LOG_LEVEL" ]]; then
         echo DefaultEnvironment=SYSTEMD_LOG_LEVEL="$TEST_SYSTEMD_LOG_LEVEL" >>"$initdir/etc/systemd/system.conf.d/99-log-level.conf"
     fi
+    # Enable debug logging for user instances as well
+    mkdir -p "$initdir/etc/systemd/user.conf.d/"
+    echo -ne "[Manager]\nLogLevel=debug\n" >"$initdir/etc/systemd/user.conf.d/10-log-level.conf"
     # Store coredumps in journal
     mkdir -p "$initdir/etc/systemd/coredump.conf.d/"
     echo -ne "[Coredump]\nStorage=journal\n" >"$initdir/etc/systemd/coredump.conf.d/10-storage-journal.conf"
@@ -3303,6 +3313,9 @@ test_setup() {
 test_run() {
     local test_id="${1:?}"
     mount_initdir
+
+    # Reset the boot counter, if present
+    rm -f "${initdir:?}/var/tmp/.systemd_reboot_count"
 
     if ! get_bool "${TEST_NO_QEMU:=}"; then
         if run_qemu "$test_id"; then

@@ -83,6 +83,7 @@ simple_tests += files(
         'test-exit-status.c',
         'test-extract-word.c',
         'test-fdset.c',
+        'test-fiemap.c',
         'test-fileio.c',
         'test-firewall-util.c',
         'test-format-table.c',
@@ -153,7 +154,7 @@ simple_tests += files(
         'test-sigbus.c',
         'test-signal-util.c',
         'test-siphash24.c',
-        'test-sleep.c',
+        'test-sleep-config.c',
         'test-socket-netlink.c',
         'test-socket-util.c',
         'test-specifier.c',
@@ -219,6 +220,10 @@ executables += [
         },
         test_template + {
                 'sources' : files('test-btrfs.c'),
+                'type' : 'manual',
+        },
+        test_template + {
+                'sources' : files('test-btrfs-physical-offset.c'),
                 'type' : 'manual',
         },
         test_template + {
@@ -397,29 +402,6 @@ executables += [
                 'link_with' : libbasic,
         },
         test_template + {
-                'sources' : files('test-tables.c'),
-                'link_with' : [
-                        libcore,
-                        libjournal_core,
-                        libshared,
-                        libudevd_core,
-                ],
-                'dependencies' : [
-                        libblkid,
-                        liblz4,
-                        libmount,
-                        libseccomp,
-                        libselinux,
-                        libxz,
-                        threads,
-                ],
-                'include_directories' : [
-                        core_includes,
-                        journal_includes,
-                        udev_includes,
-                ],
-        },
-        test_template + {
                 'sources' : files('test-time-util.c'),
                 'timeout' : 120,
         },
@@ -433,6 +415,10 @@ executables += [
         },
         test_template + {
                 'sources' : files('test-varlink.c'),
+                'dependencies' : threads,
+        },
+        test_template + {
+                'sources' : files('test-varlink-idl.c'),
                 'dependencies' : threads,
         },
         test_template + {
@@ -564,6 +550,9 @@ executables += [
                 'sources' : files('test-socket-bind.c'),
                 'dependencies' : libdl,
                 'conditions' : ['BPF_FRAMEWORK'],
+        },
+        core_test_template + {
+                'sources' : files('test-tables.c'),
         },
         core_test_template + {
                 'sources' : files('test-unit-name.c'),

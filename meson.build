@@ -171,8 +171,15 @@ systemdstatedir = localstatedir / 'lib/systemd'
 catalogstatedir = systemdstatedir / 'catalog'
 randomseeddir = localstatedir / 'lib/systemd'
 profiledir = libexecdir / 'portable' / 'profile'
+repartdefinitionsdir = libexecdir / 'repart/definitions'
 ntpservicelistdir = prefixdir / 'lib/systemd/ntp-units.d'
 credstoredir = prefixdir / 'lib/credstore'
+
+configfiledir = get_option('configfiledir')
+if configfiledir == ''
+        configfiledir= sysconfdir
+endif
+pkgconfigfiledir = configfiledir / 'systemd'
 
 docdir = get_option('docdir')
 if docdir == ''
@@ -224,9 +231,10 @@ conf.set_quoted('SYSCONF_DIR',                                sysconfdir)
 conf.set_quoted('SYSCTL_DIR',                                 sysctldir)
 conf.set_quoted('SYSTEMCTL_BINARY_PATH',                      bindir / 'systemctl')
 conf.set_quoted('SYSTEMD_BINARY_PATH',                        libexecdir / 'systemd')
+conf.set_quoted('SYSTEMD_EXECUTOR_BINARY_PATH',               libexecdir / 'systemd-executor')
 conf.set_quoted('SYSTEMD_CATALOG_DIR',                        catalogdir)
 conf.set_quoted('SYSTEMD_CGROUPS_AGENT_PATH',                 libexecdir / 'systemd-cgroups-agent')
-conf.set_quoted('SYSTEMD_CRYPTSETUP_PATH',                    libexecdir / 'systemd-cryptsetup')
+conf.set_quoted('SYSTEMD_CRYPTSETUP_PATH',                    bindir / 'systemd-cryptsetup')
 conf.set_quoted('SYSTEMD_EXPORT_PATH',                        libexecdir / 'systemd-export')
 conf.set_quoted('SYSTEMD_FSCK_PATH',                          libexecdir / 'systemd-fsck')
 conf.set_quoted('SYSTEMD_GROWFS_PATH',                        libexecdir / 'systemd-growfs')
@@ -482,7 +490,7 @@ if cxx_cmd != ''
         add_project_arguments(cxx.get_supported_arguments(basic_disabled_warnings), language : 'cpp')
 endif
 
-cpp = ' '.join(cc.cmd_array()) + ' -E'
+cpp = ' '.join(cc.cmd_array() + get_option('c_args')) + ' -E'
 
 has_wstringop_truncation = cc.has_argument('-Wstringop-truncation')
 
@@ -765,10 +773,12 @@ conf.set('EXTRA_NET_NAMING_SCHEMES', ' '.join(extra_net_naming_schemes))
 conf.set('EXTRA_NET_NAMING_MAP', ' '.join(extra_net_naming_map))
 
 default_net_naming_scheme = get_option('default-net-naming-scheme')
-conf.set_quoted('DEFAULT_NET_NAMING_SCHEME', default_net_naming_scheme)
+conf.set_quoted('DEFAULT_NET_NAMING_SCHEME', default_net_naming_scheme,
+                description : 'Default naming scheme as a string')
 if default_net_naming_scheme != 'latest'
-        conf.set('_DEFAULT_NET_NAMING_SCHEME_TEST',
-                 'NAMING_' + default_net_naming_scheme.underscorify().to_upper())
+        conf.set('_DEFAULT_NET_NAMING_SCHEME',
+                 'NAMING_' + default_net_naming_scheme.underscorify().to_upper(),
+                 description : 'Default naming scheme as a constant')
 endif
 
 time_epoch = get_option('time-epoch')
@@ -880,7 +890,7 @@ if not meson.is_cross_build()
 endif
 if nobody_user != nobody_group and not (nobody_user == 'nobody' and nobody_group == 'nogroup')
         warning('\n' +
-                'The configured user name "@0@" and group name "@0@" of the nobody user/group are not equivalent.\n'.format(nobody_user, nobody_group) +
+                'The configured user name "@0@" and group name "@1@" of the nobody user/group are not equivalent.\n'.format(nobody_user, nobody_group) +
                 'Please re-check that both "nobody-user" and "nobody-group" options are correctly set.')
 endif
 
@@ -1783,19 +1793,18 @@ if have and efi_arch == 'x64' and cc.links('''
         efi_cpu_family_alt = 'x86'
 endif
 
-want_ukify = get_option('ukify').require(
-        python_39 and conf.get('ENABLE_BOOTLOADER') == 1,
-        error_message : 'Python >= 3.9 and -Dbootloader=true required').allowed()
+want_ukify = get_option('ukify').require(python_39, error_message : 'Python >= 3.9 required').allowed()
 conf.set10('ENABLE_UKIFY', want_ukify)
 
 ############################################################
 
-elf2efi_lds = project_source_root / 'tools/elf2efi.lds'
+check_version_history_py = find_program('tools/check-version-history.py')
 elf2efi_py = find_program('tools/elf2efi.py')
 export_dbus_interfaces_py = find_program('tools/dbus_exporter.py')
 generate_gperfs = find_program('tools/generate-gperfs.py')
 make_autosuspend_rules_py = find_program('tools/make-autosuspend-rules.py')
 make_directive_index_py = find_program('tools/make-directive-index.py')
+sync_docs_py = find_program('tools/sync-docs.py')
 make_man_index_py = find_program('tools/make-man-index.py')
 meson_render_jinja2 = find_program('tools/meson-render-jinja2.py')
 update_dbus_docs_py = find_program('tools/update-dbus-docs.py')
@@ -2100,8 +2109,6 @@ module_additional_kwargs = {
 
 # systemd-analyze requires 'libcore'
 subdir('src/core')
-# systemd-journal-remote requires 'libjournal_core'
-subdir('src/journal')
 # systemd-networkd requires 'libsystemd_network'
 subdir('src/libsystemd-network')
 # hwdb requires 'udev_link_with' and 'udev_rpath'
@@ -2142,6 +2149,7 @@ subdir('src/id128')
 subdir('src/import')
 subdir('src/initctl')
 subdir('src/integritysetup')
+subdir('src/journal')
 subdir('src/journal-remote')
 subdir('src/kernel-install')
 subdir('src/locale')
@@ -2160,6 +2168,7 @@ subdir('src/nss-systemd')
 subdir('src/oom')
 subdir('src/partition')
 subdir('src/path')
+subdir('src/pcrextend')
 subdir('src/portable')
 subdir('src/pstore')
 subdir('src/quotacheck')
@@ -2187,12 +2196,14 @@ subdir('src/sysusers')
 subdir('src/sysv-generator')
 subdir('src/timedate')
 subdir('src/timesync')
+subdir('src/tpm2-setup')
 subdir('src/tmpfiles')
 subdir('src/tty-ask-password-agent')
 subdir('src/update-done')
 subdir('src/update-utmp')
 subdir('src/user-sessions')
 subdir('src/userdb')
+subdir('src/varlinkctl')
 subdir('src/vconsole')
 subdir('src/veritysetup')
 subdir('src/volatile-root')
@@ -2366,17 +2377,20 @@ foreach dict : modules
 
         kwargs = {}
         foreach key, val : dict
-                if key in ['name', 'conditions']
+                if key in ['name', 'conditions', 'version-script']
                         continue
                 endif
                 kwargs += { key : val }
         endforeach
 
-        sym = meson.current_source_dir() / '@0@'.format(dict.get('link_depends')[0])
         kwargs += {
                 'link_args' : [
                         kwargs.get('link_args', []),
-                        '-Wl,--version-script=' + sym,
+                        '-Wl,--version-script=' + dict.get('version-script'),
+                ],
+                'link_depends' : [
+                        kwargs.get('link_depends', []),
+                        dict.get('version-script'),
                 ],
         }
         foreach key, val : module_additional_kwargs
@@ -2418,6 +2432,7 @@ ukify = custom_target(
 if want_ukify
         public_programs += ukify
 
+        # symlink for backwards compatibility after rename
         meson.add_install_script(sh, '-c',
                                  ln_s.format(bindir / 'ukify',
                                              libexecdir / 'ukify'))

@@ -79,6 +79,7 @@ shared_sources = files(
         'geneve-util.c',
         'gpt.c',
         'group-record.c',
+        'hibernate-util.c',
         'hostname-setup.c',
         'hwdb-util.c',
         'id128-print.c',
@@ -92,6 +93,7 @@ shared_sources = files(
         'install.c',
         'ip-protocol-list.c',
         'ipvlan-util.c',
+        'journal-file-util.c',
         'journal-importer.c',
         'journal-util.c',
         'json.c',
@@ -131,6 +133,7 @@ shared_sources = files(
         'password-quality-util-passwdqc.c',
         'password-quality-util-pwquality.c',
         'pcre2-util.c',
+        'pcrextend-util.c',
         'pe-binary.c',
         'pkcs11-util.c',
         'pretty-print.c',
@@ -146,7 +149,7 @@ shared_sources = files(
         'selinux-util.c',
         'serialize.c',
         'service-util.c',
-        'sleep-util.c',
+        'sleep-config.c',
         'smack-util.c',
         'socket-label.c',
         'socket-netlink.c',
@@ -164,6 +167,17 @@ shared_sources = files(
         'userdb-dropin.c',
         'userdb.c',
         'varlink.c',
+        'varlink-idl.c',
+        'varlink-io.systemd.c',
+        'varlink-io.systemd.Journal.c',
+        'varlink-io.systemd.ManagedOOM.c',
+        'varlink-io.systemd.PCRExtend.c',
+        'varlink-io.systemd.Resolve.Monitor.c',
+        'varlink-io.systemd.Resolve.c',
+        'varlink-io.systemd.UserDatabase.c',
+        'varlink-io.systemd.oom.c',
+        'varlink-io.systemd.sysext.c',
+        'varlink-org.varlink.service.c',
         'verb-log-control.c',
         'verbs.c',
         'vlan-util.c',
@@ -315,7 +329,7 @@ libshared_deps = [threads,
                   libxz,
                   libzstd]
 
-libshared_sym_path = '@0@/libshared.sym'.format(meson.current_source_dir())
+libshared_sym_path = meson.current_source_dir() / 'libshared.sym'
 libshared_build_dir = meson.current_build_dir()
 
 libshared_static = static_library(
@@ -333,6 +347,7 @@ libshared = shared_library(
         c_args : ['-fvisibility=default'],
         link_args : ['-shared',
                      '-Wl,--version-script=' + libshared_sym_path],
+        link_depends : libshared_sym_path,
         link_whole : [libshared_static,
                       libbasic,
                       libbasic_gcrypt,

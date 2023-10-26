@@ -10,8 +10,12 @@ for ((i = 0; i < ITERATIONS; i++)); do
     dd if=/dev/urandom bs=1M count=1 | base64 | systemd-cat
 done
 journalctl --rotate
+# Let's test varlinkctl a bit, i.e. implement the equivalent of 'journalctl --rotate' via varlinkctl
+varlinkctl call /run/systemd/journal/io.systemd.journal io.systemd.Journal.Rotate '{}'
 journalctl --flush
+varlinkctl call /run/systemd/journal/io.systemd.journal io.systemd.Journal.FlushToVar '{}'
 journalctl --sync
+varlinkctl call /run/systemd/journal/io.systemd.journal io.systemd.Journal.Synchronize '{}'
 journalctl --rotate --vacuum-size=8M
 
 # Reset the ratelimit buckets for the subsequent tests below.
@@ -42,7 +46,8 @@ write_and_match "<5> \t Leading spaces\n" " \t Leading spaces\n" --level-prefix 
 # --output-fields restricts output
 ID="$(systemd-id128 new)"
 echo -ne "foo" | systemd-cat -t "$ID" --level-prefix false
-journalctl --sync
+# Let's test varlinkctl a bit, i.e. implement the equivalent of 'journalctl --sync' via varlinkctl
+varlinkctl call /run/systemd/journal/io.systemd.journal io.systemd.Journal.Synchronize '{}'
 journalctl -b -o export --output-fields=MESSAGE,FOO --output-fields=PRIORITY,MESSAGE -t "$ID" >/tmp/output
 [[ $(wc -l </tmp/output) -eq 9 ]]
 grep -q '^__CURSOR=' /tmp/output
@@ -233,6 +238,6 @@ done < <(find /test-journals/no-rtc -name "*.zst")
 
 journalctl --directory="$JOURNAL_DIR" --list-boots --output=json >/tmp/lb1
 diff -u /tmp/lb1 - <<'EOF'
-[{"index":-3,"boot_id":"5ea5fc4f82a14186b5332a788ef9435e","first_entry":1666569600994371,"last_entry":1666584266223608},{"index":-2,"boot_id":"bea6864f21ad4c9594c04a99d89948b0","first_entry":1666584266731785,"last_entry":1666584347230411},{"index":-1,"boot_id":"4c708e1fd0744336be16f3931aa861fb","first_entry":1666584348378271,"last_entry":1666584354649355},{"index":0,"boot_id":"35e8501129134edd9df5267c49f744a4","first_entry":1666584356661527,"last_entry":1666584438086856}]
+[{"index":-3,"boot_id":"5ea5fc4f82a14186b5332a788ef9435e","first_entry":1666569600994371,"last_entry":1666584266223608},{"index":-2,"boot_id":"bea6864f21ad4c9594c04a99d89948b0","first_entry":1666569601005945,"last_entry":1666584347230411},{"index":-1,"boot_id":"4c708e1fd0744336be16f3931aa861fb","first_entry":1666569601017222,"last_entry":1666584354649355},{"index":0,"boot_id":"35e8501129134edd9df5267c49f744a4","first_entry":1666569601009823,"last_entry":1666584438086856}]
 EOF
 rm -rf "$JOURNAL_DIR" /tmp/lb1

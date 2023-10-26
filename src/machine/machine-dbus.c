@@ -19,7 +19,7 @@
 #include "format-util.h"
 #include "fs-util.h"
 #include "in-addr-util.h"
-#include "io-util.h"
+#include "iovec-util.h"
 #include "local-addresses.h"
 #include "machine-dbus.h"
 #include "machine.h"
@@ -881,7 +881,7 @@ int bus_machine_method_bind_mount(sd_bus_message *message, void *userdata, sd_bu
 
         propagate_directory = strjoina("/run/systemd/nspawn/propagate/", m->name);
         r = bind_mount_in_namespace(
-                        m->leader.pid,
+                        &m->leader,
                         propagate_directory,
                         "/run/host/incoming/",
                         src, dest,

@@ -112,7 +112,7 @@
 /* How many units and jobs to process of the bus queue before returning to the event loop. */
 #define MANAGER_BUS_MESSAGE_BUDGET 100U
 
-#define DEFAULT_TASKS_MAX ((TasksMax) { 15U, 100U }) /* 15% */
+#define DEFAULT_TASKS_MAX ((CGroupTasksMax) { 15U, 100U }) /* 15% */
 
 static int manager_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t revents, void *userdata);
 static int manager_dispatch_cgroups_agent_fd(sd_event_source *source, int fd, uint32_t revents, void *userdata);
@@ -142,6 +142,15 @@ static usec_t manager_watch_jobs_next_time(Manager *m) {
                 timeout = JOBS_IN_PROGRESS_QUIET_WAIT_USEC;
 
         return usec_add(now(CLOCK_MONOTONIC), timeout);
+}
+
+static bool manager_is_confirm_spawn_disabled(Manager *m) {
+        assert(m);
+
+        if (!m->confirm_spawn)
+                return true;
+
+        return access("/run/systemd/confirm_spawn_disabled", F_OK) >= 0;
 }
 
 static void manager_watch_jobs_in_progress(Manager *m) {
@@ -857,6 +866,21 @@ void manager_set_switching_root(Manager *m, bool switching_root) {
         m->switching_root = MANAGER_IS_SYSTEM(m) && switching_root;
 }
 
+double manager_get_progress(Manager *m) {
+        assert(m);
+
+        if (MANAGER_IS_FINISHED(m) || m->n_installed_jobs == 0)
+                return 1.0;
+
+        return 1.0 - ((double) hashmap_size(m->jobs) / (double) m->n_installed_jobs);
+}
+
+static int compare_job_priority(const void *a, const void *b) {
+        const Job *x = a, *y = b;
+
+        return unit_compare_priority(x->unit, y->unit);
+}
+
 int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, Manager **_m) {
         _cleanup_(manager_freep) Manager *m = NULL;
         int r;
@@ -906,6 +930,8 @@ int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, 
                         .interval = 10 * USEC_PER_MINUTE,
                         .burst = 10,
                 },
+
+                .executor_fd = -EBADF,
         };
 
         unit_defaults_init(&m->defaults, runtime_scope);
@@ -1024,6 +1050,42 @@ int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, 
 
                 if (r < 0 && r != -EEXIST)
                         return r;
+
+                m->executor_fd = open(SYSTEMD_EXECUTOR_BINARY_PATH, O_CLOEXEC|O_PATH);
+                if (m->executor_fd < 0)
+                        return log_warning_errno(errno,
+                                                 "Failed to open executor binary '%s': %m",
+                                                 SYSTEMD_EXECUTOR_BINARY_PATH);
+        } else if (!FLAGS_SET(test_run_flags, MANAGER_TEST_DONT_OPEN_EXECUTOR)) {
+                _cleanup_free_ char *self_exe = NULL, *executor_path = NULL;
+                _cleanup_close_ int self_dir_fd = -EBADF;
+                int level = LOG_DEBUG;
+
+                /* Prefer sd-executor from the same directory as the test, e.g.: when running unit tests from the
+                * build directory. Fallback to working directory and then the installation path. */
+                r = readlink_and_make_absolute("/proc/self/exe", &self_exe);
+                if (r < 0)
+                        return r;
+
+                self_dir_fd = open_parent(self_exe, O_CLOEXEC|O_DIRECTORY, 0);
+                if (self_dir_fd < 0)
+                        return -errno;
+
+                m->executor_fd = openat(self_dir_fd, "systemd-executor", O_CLOEXEC|O_PATH);
+                if (m->executor_fd < 0 && errno == ENOENT)
+                        m->executor_fd = openat(AT_FDCWD, "systemd-executor", O_CLOEXEC|O_PATH);
+                if (m->executor_fd < 0 && errno == ENOENT) {
+                        m->executor_fd = open(SYSTEMD_EXECUTOR_BINARY_PATH, O_CLOEXEC|O_PATH);
+                        level = LOG_WARNING; /* Tests should normally use local builds */
+                }
+                if (m->executor_fd < 0)
+                        return -errno;
+
+                r = fd_get_path(m->executor_fd, &executor_path);
+                if (r < 0)
+                        return r;
+
+                log_full(level, "Using systemd-executor binary from '%s'", executor_path);
         }
 
         /* Note that we do not set up the notify fd here. We do that after deserialization,
@@ -1622,6 +1684,7 @@ Manager* manager_free(Manager *m) {
         hashmap_free(m->units_by_invocation_id);
         hashmap_free(m->jobs);
         hashmap_free(m->watch_pids);
+        hashmap_free(m->watch_pids_more);
         hashmap_free(m->watch_bus);
 
         prioq_free(m->run_queue);
@@ -1679,9 +1742,13 @@ Manager* manager_free(Manager *m) {
         free(m->watchdog_pretimeout_governor);
         free(m->watchdog_pretimeout_governor_overridden);
 
+        m->fw_ctx = fw_ctx_free(m->fw_ctx);
+
 #if BPF_FRAMEWORK
         lsm_bpf_destroy(m->restrict_fs);
 #endif
+
+        safe_close(m->executor_fd);
 
         return mfree(m);
 }
@@ -2372,14 +2439,18 @@ void manager_clear_jobs(Manager *m) {
                 job_finish_and_invalidate(j, JOB_CANCELED, false, false);
 }
 
-void manager_unwatch_pid(Manager *m, pid_t pid) {
+void manager_unwatch_pidref(Manager *m, PidRef *pid) {
         assert(m);
 
-        /* First let's drop the unit keyed as "pid". */
-        (void) hashmap_remove(m->watch_pids, PID_TO_PTR(pid));
+        for (;;) {
+                Unit *u;
 
-        /* Then, let's also drop the array keyed by -pid. */
-        free(hashmap_remove(m->watch_pids, PID_TO_PTR(-pid)));
+                u = manager_get_unit_by_pidref_watching(m, pid);
+                if (!u)
+                        break;
+
+                unit_unwatch_pidref(u, pid);
+        }
 }
 
 static int manager_dispatch_run_queue(sd_event_source *source, void *userdata) {
@@ -2672,10 +2743,13 @@ static int manager_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t 
         /* Increase the generation counter used for filtering out duplicate unit invocations. */
         m->notifygen++;
 
+        /* Generate lookup key from the PID (we have no pidfd here, after all) */
+        PidRef pidref = PIDREF_MAKE_FROM_PID(ucred->pid);
+
         /* Notify every unit that might be interested, which might be multiple. */
-        u1 = manager_get_unit_by_pid_cgroup(m, ucred->pid);
-        u2 = hashmap_get(m->watch_pids, PID_TO_PTR(ucred->pid));
-        array = hashmap_get(m->watch_pids, PID_TO_PTR(-ucred->pid));
+        u1 = manager_get_unit_by_pidref_cgroup(m, &pidref);
+        u2 = hashmap_get(m->watch_pids, &pidref);
+        array = hashmap_get(m->watch_pids_more, &pidref);
         if (array) {
                 size_t k = 0;
 
@@ -2758,7 +2832,7 @@ static int manager_dispatch_sigchld(sd_event_source *source, void *userdata) {
                 _cleanup_free_ char *name = NULL;
                 Unit *u1, *u2, **array;
 
-                (void) get_process_comm(si.si_pid, &name);
+                (void) pid_get_comm(si.si_pid, &name);
 
                 log_debug("Child "PID_FMT" (%s) died (code=%s, status=%i/%s)",
                           si.si_pid, strna(name),
@@ -2771,10 +2845,14 @@ static int manager_dispatch_sigchld(sd_event_source *source, void *userdata) {
                 /* Increase the generation counter used for filtering out duplicate unit invocations */
                 m->sigchldgen++;
 
+                /* We look this up by a PidRef that only consists of the PID. After all we couldn't create a
+                 * pidfd here any more even if we wanted (since the process just exited). */
+                PidRef pidref = PIDREF_MAKE_FROM_PID(si.si_pid);
+
                 /* And now figure out the unit this belongs to, it might be multiple... */
-                u1 = manager_get_unit_by_pid_cgroup(m, si.si_pid);
-                u2 = hashmap_get(m->watch_pids, PID_TO_PTR(si.si_pid));
-                array = hashmap_get(m->watch_pids, PID_TO_PTR(-si.si_pid));
+                u1 = manager_get_unit_by_pidref_cgroup(m, &pidref);
+                u2 = hashmap_get(m->watch_pids, &pidref);
+                array = hashmap_get(m->watch_pids_more, &pidref);
                 if (array) {
                         size_t n = 0;
 
@@ -3555,6 +3633,7 @@ int manager_reload(Manager *m) {
 
         /* We flushed out generated files, for which we don't watch mtime, so we should flush the old map. */
         manager_free_unit_name_maps(m);
+        m->unit_file_state_outdated = false;
 
         /* First, enumerate what we can from kernel and suchlike */
         manager_enumerate_perpetual(m);
@@ -4409,13 +4488,6 @@ void manager_disable_confirm_spawn(void) {
         (void) touch("/run/systemd/confirm_spawn_disabled");
 }
 
-bool manager_is_confirm_spawn_disabled(Manager *m) {
-        if (!m->confirm_spawn)
-                return true;
-
-        return access("/run/systemd/confirm_spawn_disabled", F_OK) >= 0;
-}
-
 static bool manager_should_show_status(Manager *m, StatusType type) {
         assert(m);
 
@@ -4889,6 +4961,35 @@ ManagerTimestamp manager_timestamp_initrd_mangle(ManagerTimestamp s) {
         return s;
 }
 
+int manager_allocate_idle_pipe(Manager *m) {
+        int r;
+
+        assert(m);
+
+        if (m->idle_pipe[0] >= 0) {
+                assert(m->idle_pipe[1] >= 0);
+                assert(m->idle_pipe[2] >= 0);
+                assert(m->idle_pipe[3] >= 0);
+                return 0;
+        }
+
+        assert(m->idle_pipe[1] < 0);
+        assert(m->idle_pipe[2] < 0);
+        assert(m->idle_pipe[3] < 0);
+
+        r = RET_NERRNO(pipe2(m->idle_pipe + 0, O_NONBLOCK|O_CLOEXEC));
+        if (r < 0)
+                return r;
+
+        r = RET_NERRNO(pipe2(m->idle_pipe + 2, O_NONBLOCK|O_CLOEXEC));
+        if (r < 0) {
+                safe_close_pair(m->idle_pipe + 0);
+                return r;
+        }
+
+        return 1;
+}
+
 void unit_defaults_init(UnitDefaults *defaults, RuntimeScope scope) {
         assert(defaults);
         assert(scope >= 0);
@@ -4931,6 +5032,17 @@ void unit_defaults_done(UnitDefaults *defaults) {
 
         defaults->smack_process_label = mfree(defaults->smack_process_label);
         rlimit_free_all(defaults->rlimit);
+}
+
+LogTarget manager_get_executor_log_target(Manager *m) {
+        assert(m);
+
+        /* If journald is not available tell sd-executor to go to kmsg, as it might be starting journald */
+
+        if (manager_journal_is_running(m))
+                return log_get_target();
+
+        return LOG_TARGET_KMSG;
 }
 
 static const char *const manager_state_table[_MANAGER_STATE_MAX] = {

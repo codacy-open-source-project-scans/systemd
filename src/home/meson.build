@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-home_includes = [includes, include_directories('.')]
-
 systemd_homework_sources = files(
         'home-util.c',
         'homework-cifs.c',
@@ -123,7 +121,7 @@ modules += [
                         libpam,
                         threads,
                 ],
-                'link_depends' : files('pam_systemd_home.sym'),
+                'version-script' : meson.current_source_dir() / 'pam_systemd_home.sym',
         },
 ]
 
@@ -137,6 +135,6 @@ if conf.get('ENABLE_HOMED') == 1
 
         if install_sysconfdir_samples
                 install_data('homed.conf',
-                             install_dir : pkgsysconfdir)
+                             install_dir : pkgconfigfiledir)
         endif
 endif

@@ -13,7 +13,7 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
-#include "io-util.h"
+#include "iovec-util.h"
 #include "memfd-util.h"
 #include "parse-util.h"
 #include "path-util.h"
@@ -582,10 +582,21 @@ TEST(search_and_fopen) {
         f = safe_fclose(f);
         p = mfree(p);
 
+        r = search_and_fopen(basename(name), NULL, NULL, (const char**) dirs, NULL, &p);
+        assert_se(r >= 0);
+        assert_se(e = path_startswith(p, "/tmp/"));
+        assert_se(streq(basename(name), e));
+        p = mfree(p);
+
         r = search_and_fopen(name, "re", NULL, (const char**) dirs, &f, &p);
         assert_se(r >= 0);
         assert_se(path_equal(name, p));
         f = safe_fclose(f);
+        p = mfree(p);
+
+        r = search_and_fopen(name, NULL, NULL, (const char**) dirs, NULL, &p);
+        assert_se(r >= 0);
+        assert_se(path_equal(name, p));
         p = mfree(p);
 
         r = search_and_fopen(basename(name), "re", "/", (const char**) dirs, &f, &p);
@@ -595,15 +606,27 @@ TEST(search_and_fopen) {
         f = safe_fclose(f);
         p = mfree(p);
 
+        r = search_and_fopen(basename(name), NULL, "/", (const char**) dirs, NULL, &p);
+        assert_se(r >= 0);
+        assert_se(e = path_startswith(p, "/tmp/"));
+        assert_se(streq(basename(name), e));
+        p = mfree(p);
+
         r = search_and_fopen("/a/file/which/does/not/exist/i/guess", "re", NULL, (const char**) dirs, &f, &p);
         assert_se(r == -ENOENT);
+        r = search_and_fopen("/a/file/which/does/not/exist/i/guess", NULL, NULL, (const char**) dirs, NULL, &p);
+        assert_se(r == -ENOENT);
         r = search_and_fopen("afilewhichdoesnotexistiguess", "re", NULL, (const char**) dirs, &f, &p);
+        assert_se(r == -ENOENT);
+        r = search_and_fopen("afilewhichdoesnotexistiguess", NULL, NULL, (const char**) dirs, NULL, &p);
         assert_se(r == -ENOENT);
 
         r = unlink(name);
         assert_se(r == 0);
 
         r = search_and_fopen(basename(name), "re", NULL, (const char**) dirs, &f, &p);
+        assert_se(r == -ENOENT);
+        r = search_and_fopen(basename(name), NULL, NULL, (const char**) dirs, NULL, &p);
         assert_se(r == -ENOENT);
 }
 
@@ -1073,7 +1096,7 @@ static void test_read_virtual_file_one(size_t max_size) {
         }
 }
 
-TEST(test_read_virtual_file) {
+TEST(read_virtual_file) {
         test_read_virtual_file_one(0);
         test_read_virtual_file_one(1);
         test_read_virtual_file_one(2);
@@ -1083,7 +1106,7 @@ TEST(test_read_virtual_file) {
         test_read_virtual_file_one(SIZE_MAX);
 }
 
-TEST(test_fdopen_independent) {
+TEST(fdopen_independent) {
 #define TEST_TEXT "this is some random test text we are going to write to a memfd"
         _cleanup_close_ int fd = -EBADF;
         _cleanup_fclose_ FILE *f = NULL;

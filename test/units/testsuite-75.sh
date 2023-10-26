@@ -317,6 +317,7 @@ FILTERED_NAMES=(
     "255.255.255.255.in-addr.arpa"
     "0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa"
     "hello.invalid"
+    "hello.alt"
 )
 
 for name in "${FILTERED_NAMES[@]}"; do
@@ -530,7 +531,7 @@ grep -qF "fd00:dead:beef:cafe::123" "$RUN_OUT"
 
 systemctl stop resmontest.service
 
-# Test serve stale feature if nftables is installed
+# Test serve stale feature and NFTSet= if nftables is installed
 if command -v nft >/dev/null; then
     ### Test without serve stale feature ###
     NFT_FILTER_NAME=dns_port_filter
@@ -589,8 +590,64 @@ if command -v nft >/dev/null; then
     grep -qE "NXDOMAIN" "$RUN_OUT"
 
     nft flush ruleset
+
+    ### NFTSet= test
+    nft add table inet sd_test
+    nft add set inet sd_test c '{ type cgroupsv2; }'
+    nft add set inet sd_test u '{ typeof meta skuid; }'
+    nft add set inet sd_test g '{ typeof meta skgid; }'
+
+    # service
+    systemd-run --unit test-nft.service --service-type=exec -p DynamicUser=yes \
+                -p 'NFTSet=cgroup:inet:sd_test:c user:inet:sd_test:u group:inet:sd_test:g' sleep 10000
+    run nft list set inet sd_test c
+    grep -qF "test-nft.service" "$RUN_OUT"
+    uid=$(getent passwd test-nft | cut -d':' -f3)
+    run nft list set inet sd_test u
+    grep -qF "$uid" "$RUN_OUT"
+    gid=$(getent passwd test-nft | cut -d':' -f4)
+    run nft list set inet sd_test g
+    grep -qF "$gid" "$RUN_OUT"
+    systemctl stop test-nft.service
+
+    # scope
+    run systemd-run --scope -u test-nft.scope -p 'NFTSet=cgroup:inet:sd_test:c' nft list set inet sd_test c
+    grep -qF "test-nft.scope" "$RUN_OUT"
+
+    mkdir -p /run/systemd/system
+    # socket
+    {
+        echo "[Socket]"
+        echo "ListenStream=12345"
+        echo "BindToDevice=lo"
+        echo "NFTSet=cgroup:inet:sd_test:c"
+    } >/run/systemd/system/test-nft.socket
+    {
+        echo "[Service]"
+        echo "ExecStart=/usr/bin/sleep 10000"
+    } >/run/systemd/system/test-nft.service
+    systemctl daemon-reload
+    systemctl start test-nft.socket
+    systemctl status test-nft.socket
+    run nft list set inet sd_test c
+    grep -qF "test-nft.socket" "$RUN_OUT"
+    systemctl stop test-nft.socket
+    rm -f /run/systemd/system/test-nft.{socket,service}
+
+    # slice
+    mkdir /run/systemd/system/system.slice.d
+    {
+        echo "[Slice]"
+        echo "NFTSet=cgroup:inet:sd_test:c"
+    } >/run/systemd/system/system.slice.d/00-test-nft.conf
+    systemctl daemon-reload
+    run nft list set inet sd_test c
+    grep -qF "system.slice" "$RUN_OUT"
+    rm -rf /run/systemd/system/system.slice.d
+
+    nft flush ruleset
 else
-    echo "nftables is not installed. Skipped serve stale feature test."
+    echo "nftables is not installed. Skipped serve stale feature and NFTSet= tests."
 fi
 
 ### Test resolvectl show-server-state ###

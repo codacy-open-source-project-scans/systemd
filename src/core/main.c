@@ -780,7 +780,7 @@ static void set_manager_settings(Manager *m) {
         if (r < 0)
                 log_warning_errno(r, "Failed to set watchdog pretimeout governor to '%s', ignoring: %m", arg_watchdog_pretimeout_governor);
 
-        manager_set_show_status(m, arg_show_status, "commandline");
+        manager_set_show_status(m, arg_show_status, "command line");
         m->status_unit_format = arg_status_unit_format;
 }
 
@@ -1108,7 +1108,7 @@ static int prepare_reexecute(
         if (r < 0)
                 return r;
 
-        if (fseeko(f, 0, SEEK_SET) == (off_t) -1)
+        if (fseeko(f, 0, SEEK_SET) < 0)
                 return log_error_errno(errno, "Failed to rewind serialization fd: %m");
 
         r = fd_cloexec(fileno(f), false);
@@ -1766,7 +1766,8 @@ static void finish_remaining_processes(ManagerObjective objective) {
         if (IN_SET(objective, MANAGER_SWITCH_ROOT, MANAGER_SOFT_REBOOT))
                 broadcast_signal(SIGTERM, /* wait_for_exit= */ false, /* send_sighup= */ true, arg_defaults.timeout_stop_usec);
 
-        /* On soft reboot really make sure nothing is left */
+        /* On soft reboot really make sure nothing is left. Note that this will skip cgroups
+         * of units that were configured with SurviveFinalKillSignal=yes. */
         if (objective == MANAGER_SOFT_REBOOT)
                 broadcast_signal(SIGKILL, /* wait_for_exit= */ false, /* send_sighup= */ false, arg_defaults.timeout_stop_usec);
 }
@@ -2130,15 +2131,15 @@ static void log_execution_mode(bool *ret_first_boot) {
                         _cleanup_free_ char *id_text = NULL;
 
                         /* Let's check whether we are in first boot. First, check if an override was
-                         * specified on the kernel commandline. If yes, we honour that. */
+                         * specified on the kernel command line. If yes, we honour that. */
 
                         r = proc_cmdline_get_bool("systemd.condition-first-boot", /* flags = */ 0, &first_boot);
                         if (r < 0)
-                                log_debug_errno(r, "Failed to parse systemd.condition-first-boot= kernel commandline argument, ignoring: %m");
+                                log_debug_errno(r, "Failed to parse systemd.condition-first-boot= kernel command line argument, ignoring: %m");
 
                         if (r > 0)
                                 log_full(first_boot ? LOG_INFO : LOG_DEBUG,
-                                         "Kernel commandline argument says we are %s first boot.",
+                                         "Kernel command line argument says we are %s first boot.",
                                          first_boot ? "in" : "not in");
                         else {
                                 /* Second, perform autodetection. We use /etc/machine-id as flag file for
@@ -2151,7 +2152,7 @@ static void log_execution_mode(bool *ret_first_boot) {
                                 r = read_one_line_file("/etc/machine-id", &id_text);
                                 if (r < 0 || streq(id_text, "uninitialized")) {
                                         if (r < 0 && r != -ENOENT)
-                                                log_warning_errno(r, "Unexpected error while reading /etc/machine-id, ignoring: %m");
+                                                log_warning_errno(r, "Unexpected error while reading /etc/machine-id, assuming first boot: %m");
 
                                         first_boot = true;
                                         log_info("Detected first boot.");
@@ -2991,7 +2992,7 @@ int main(int argc, char *argv[]) {
 
         r = parse_argv(argc, argv);
         if (r < 0) {
-                error_message = "Failed to parse commandline arguments";
+                error_message = "Failed to parse command line arguments";
                 goto finish;
         }
 

@@ -534,6 +534,10 @@ def read_link_attr(*args):
     with open(os.path.join('/sys/class/net', *args), encoding='utf-8') as f:
         return f.readline().strip()
 
+def read_manager_state_file():
+    with open('/run/systemd/netif/state', encoding='utf-8') as f:
+        return f.read()
+
 def read_link_state_file(link):
     ifindex = read_link_attr(link, 'ifindex')
     path = os.path.join('/run/systemd/netif/links', ifindex)
@@ -567,7 +571,12 @@ def stop_by_pid_file(pid_file):
                 print(f"Unexpected exception when waiting for {pid} to die: {e.errno}")
     rm_f(pid_file)
 
-def start_dnsmasq(*additional_options, interface='veth-peer', lease_time='2m', ipv4_range='192.168.5.10,192.168.5.200', ipv4_router='192.168.5.1', ipv6_range='2600::10,2600::20'):
+def start_dnsmasq(*additional_options, interface='veth-peer', ra_mode=None, ipv4_range='192.168.5.10,192.168.5.200', ipv4_router='192.168.5.1', ipv6_range='2600::10,2600::20'):
+    if ra_mode:
+        ra_mode = f',{ra_mode}'
+    else:
+        ra_mode = ''
+
     command = (
         'dnsmasq',
         f'--log-facility={dnsmasq_log_file}',
@@ -579,8 +588,8 @@ def start_dnsmasq(*additional_options, interface='veth-peer', lease_time='2m', i
         f'--interface={interface}',
         f'--dhcp-leasefile={dnsmasq_lease_file}',
         '--enable-ra',
-        f'--dhcp-range={ipv6_range},{lease_time}',
-        f'--dhcp-range={ipv4_range},{lease_time}',
+        f'--dhcp-range={ipv6_range}{ra_mode},2m',
+        f'--dhcp-range={ipv4_range},2m',
         '--dhcp-option=option:mtu,1492',
         f'--dhcp-option=option:router,{ipv4_router}',
         '--port=0',
@@ -606,6 +615,47 @@ def start_isc_dhcpd(conf_file, ipv, interface='veth-peer'):
 def stop_isc_dhcpd():
     stop_by_pid_file(isc_dhcpd_pid_file)
     rm_f(isc_dhcpd_lease_file)
+
+def get_dbus_link_path(link):
+    out = subprocess.check_output(['busctl', 'call', 'org.freedesktop.network1',
+                                   '/org/freedesktop/network1', 'org.freedesktop.network1.Manager',
+                                   'GetLinkByName', 's', link])
+
+    assert out.startswith(b'io ')
+    out = out.strip()
+    assert out.endswith(b'"')
+    out = out.decode()
+    return out[:-1].split('"')[1]
+
+def get_dhcp_client_state(link, family):
+    link_path = get_dbus_link_path(link)
+
+    out = subprocess.check_output(['busctl', 'get-property', 'org.freedesktop.network1',
+                                   link_path, f'org.freedesktop.network1.DHCPv{family}Client', 'State'])
+    assert out.startswith(b's "')
+    out = out.strip()
+    assert out.endswith(b'"')
+    return out[3:-1].decode()
+
+def get_dhcp4_client_state(link):
+    return get_dhcp_client_state(link, '4')
+
+def get_dhcp6_client_state(link):
+    return get_dhcp_client_state(link, '6')
+
+def get_link_description(link):
+    link_path = get_dbus_link_path(link)
+
+    out = subprocess.check_output(['busctl', 'call', 'org.freedesktop.network1',
+                                   link_path, 'org.freedesktop.network1.Link', 'Describe'])
+    assert out.startswith(b's "')
+    out = out.strip()
+    assert out.endswith(b'"')
+    json_raw = out[2:].decode()
+    check_json(json_raw)
+    description = json.loads(json_raw) # Convert from escaped sequences to json
+    check_json(description)
+    return json.loads(description) # Now parse the json
 
 def start_radvd(*additional_options, config_file):
     config_file_path = os.path.join(networkd_ci_temp_dir, 'radvd', config_file)
@@ -720,7 +770,11 @@ def setUpModule():
     save_timezone()
 
     create_service_dropin('systemd-networkd', networkd_bin,
-                          ['[Service]', 'Restart=no', '[Unit]', 'StartLimitIntervalSec=0'])
+                          ['[Service]',
+                           'Restart=no',
+                           'Environment=SYSTEMD_NETWORK_TEST_MODE=yes',
+                           '[Unit]',
+                           'StartLimitIntervalSec=0'])
     create_service_dropin('systemd-resolved', resolved_bin)
     create_service_dropin('systemd-timesyncd', timesyncd_bin)
 
@@ -5058,7 +5112,53 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
 
         start_networkd()
         self.wait_online(['veth-peer:carrier'])
-        start_dnsmasq()
+
+        # information request mode
+        # The name ipv6-only option may not be supported by older dnsmasq
+        # start_dnsmasq('--dhcp-option=option:ipv6-only,300')
+        start_dnsmasq('--dhcp-option=108,00:00:02:00',
+                      '--dhcp-option=option6:dns-server,[2600::ee]',
+                      '--dhcp-option=option6:ntp-server,[2600::ff]',
+                      ra_mode='ra-stateless')
+        self.wait_online(['veth99:routable', 'veth-peer:routable'])
+
+        # DHCPv6 REPLY for INFORMATION-REQUEST may be received after the link entered configured state.
+        # Let's wait for the expected DNS server being listed in the state file.
+        for _ in range(100):
+            output = read_link_state_file('veth99')
+            if 'DNS=2600::ee' in output:
+                break
+            time.sleep(.2)
+
+        # Check link state file
+        print('## link state file')
+        output = read_link_state_file('veth99')
+        print(output)
+        self.assertIn('DNS=2600::ee', output)
+        self.assertIn('NTP=2600::ff', output)
+
+        # Check manager state file
+        print('## manager state file')
+        output = read_manager_state_file()
+        print(output)
+        self.assertRegex(output, 'DNS=.*2600::ee')
+        self.assertRegex(output, 'NTP=.*2600::ff')
+
+        print('## dnsmasq log')
+        output = read_dnsmasq_log_file()
+        print(output)
+        self.assertIn('DHCPINFORMATION-REQUEST(veth-peer)', output)
+        self.assertNotIn('DHCPSOLICIT(veth-peer)', output)
+        self.assertNotIn('DHCPADVERTISE(veth-peer)', output)
+        self.assertNotIn('DHCPREQUEST(veth-peer)', output)
+        self.assertNotIn('DHCPREPLY(veth-peer)', output)
+
+        # solicit mode
+        stop_dnsmasq()
+        start_dnsmasq('--dhcp-option=108,00:00:02:00',
+                      '--dhcp-option=option6:dns-server,[2600::ee]',
+                      '--dhcp-option=option6:ntp-server,[2600::ff]')
+        networkctl_reconfigure('veth99')
         self.wait_online(['veth99:routable', 'veth-peer:routable'])
 
         # checking address
@@ -5077,9 +5177,27 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         print(output)
         self.assertRegex(output, 'token :: dev veth99')
 
+        # Make manager and link state file updated
+        check_output(*resolvectl_cmd, 'revert', 'veth99', env=env)
+
+        # Check link state file
+        print('## link state file')
+        output = read_link_state_file('veth99')
+        print(output)
+        self.assertIn('DNS=2600::ee', output)
+        self.assertIn('NTP=2600::ff', output)
+
+        # Check manager state file
+        print('## manager state file')
+        output = read_manager_state_file()
+        print(output)
+        self.assertRegex(output, 'DNS=.*2600::ee')
+        self.assertRegex(output, 'NTP=.*2600::ff')
+
         print('## dnsmasq log')
         output = read_dnsmasq_log_file()
         print(output)
+        self.assertNotIn('DHCPINFORMATION-REQUEST(veth-peer)', output)
         self.assertIn('DHCPSOLICIT(veth-peer)', output)
         self.assertNotIn('DHCPADVERTISE(veth-peer)', output)
         self.assertNotIn('DHCPREQUEST(veth-peer)', output)
@@ -5090,7 +5208,9 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
             f.write('\n[DHCPv6]\nRapidCommit=no\n')
 
         stop_dnsmasq()
-        start_dnsmasq()
+        start_dnsmasq('--dhcp-option=108,00:00:02:00',
+                      '--dhcp-option=option6:dns-server,[2600::ee]',
+                      '--dhcp-option=option6:ntp-server,[2600::ff]')
 
         networkctl_reload()
         self.wait_online(['veth99:routable', 'veth-peer:routable'])
@@ -5106,9 +5226,27 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         print(output)
         self.assertRegex(output, 'via fe80::1034:56ff:fe78:9abd')
 
+        # Make manager and link state file updated
+        check_output(*resolvectl_cmd, 'revert', 'veth99', env=env)
+
+        # Check link state file
+        print('## link state file')
+        output = read_link_state_file('veth99')
+        print(output)
+        self.assertIn('DNS=2600::ee', output)
+        self.assertIn('NTP=2600::ff', output)
+
+        # Check manager state file
+        print('## manager state file')
+        output = read_manager_state_file()
+        print(output)
+        self.assertRegex(output, 'DNS=.*2600::ee')
+        self.assertRegex(output, 'NTP=.*2600::ff')
+
         print('## dnsmasq log')
         output = read_dnsmasq_log_file()
         print(output)
+        self.assertNotIn('DHCPINFORMATION-REQUEST(veth-peer)', output)
         self.assertIn('DHCPSOLICIT(veth-peer)', output)
         self.assertIn('DHCPADVERTISE(veth-peer)', output)
         self.assertIn('DHCPREQUEST(veth-peer)', output)
@@ -5116,43 +5254,61 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertNotIn('rapid-commit', output)
 
     def test_dhcp_client_ipv6_dbus_status(self):
-        def get_dbus_dhcp6_client_state(IF):
-            out = subprocess.check_output(['busctl', 'call', 'org.freedesktop.network1',
-                                           '/org/freedesktop/network1', 'org.freedesktop.network1.Manager',
-                                           'GetLinkByName', 's', IF])
-
-            assert out.startswith(b'io ')
-            out = out.strip()
-            assert out.endswith(b'"')
-            out = out.decode()
-            linkPath = out[:-1].split('"')[1]
-
-            print(f"Found {IF} link path: {linkPath}")
-
-            out = subprocess.check_output(['busctl', 'get-property', 'org.freedesktop.network1',
-                                           linkPath, 'org.freedesktop.network1.DHCPv6Client', 'State'])
-            assert out.startswith(b's "')
-            out = out.strip()
-            assert out.endswith(b'"')
-            return out[3:-1].decode()
-
         copy_network_unit('25-veth.netdev', '25-dhcp-server-veth-peer.network', '25-dhcp-client-ipv6-only.network')
-
         start_networkd()
         self.wait_online(['veth-peer:carrier'])
 
         # Note that at this point the DHCPv6 client has not been started because no RA (with managed
-        # bit set) has yet been recieved and the configuration does not include WithoutRA=true
-        state = get_dbus_dhcp6_client_state('veth99')
-        print(f"State = {state}")
+        # bit set) has yet been received and the configuration does not include WithoutRA=true
+        state = get_dhcp6_client_state('veth99')
+        print(f"DHCPv6 client state = {state}")
         self.assertEqual(state, 'stopped')
 
-        start_dnsmasq()
+        state = get_dhcp4_client_state('veth99')
+        print(f"DHCPv4 client state = {state}")
+        self.assertEqual(state, 'selecting')
+
+        start_dnsmasq('--dhcp-option=108,00:00:02:00')
         self.wait_online(['veth99:routable', 'veth-peer:routable'])
 
-        state = get_dbus_dhcp6_client_state('veth99')
-        print(f"State = {state}")
+        state = get_dhcp6_client_state('veth99')
+        print(f"DHCPv6 client state = {state}")
         self.assertEqual(state, 'bound')
+
+        # DHCPv4 client will stop after an DHCPOFFER message received, so we need to wait for a while.
+        for _ in range(100):
+            state = get_dhcp4_client_state('veth99')
+            if state == 'stopped':
+                break
+            time.sleep(.2)
+
+        print(f"DHCPv4 client state = {state}")
+        self.assertEqual(state, 'stopped')
+
+        # restart dnsmasq to clear log
+        stop_dnsmasq()
+        start_dnsmasq('--dhcp-option=108,00:00:02:00')
+
+        # Test renew command
+        # See https://github.com/systemd/systemd/pull/29472#issuecomment-1759092138
+        check_output(*networkctl_cmd, 'renew', 'veth99', env=env)
+
+        for _ in range(100):
+            state = get_dhcp4_client_state('veth99')
+            if state == 'stopped':
+                break
+            time.sleep(.2)
+
+        print(f"DHCPv4 client state = {state}")
+        self.assertEqual(state, 'stopped')
+
+        print('## dnsmasq log')
+        output = read_dnsmasq_log_file()
+        print(output)
+        self.assertIn('DHCPDISCOVER(veth-peer) 12:34:56:78:9a:bc', output)
+        self.assertIn('DHCPOFFER(veth-peer)', output)
+        self.assertNotIn('DHCPREQUEST(veth-peer)', output)
+        self.assertNotIn('DHCPACK(veth-peer)', output)
 
     def test_dhcp_client_ipv6_only_with_custom_client_identifier(self):
         copy_network_unit('25-veth.netdev', '25-dhcp-server-veth-peer.network', '25-dhcp-client-ipv6-only-custom-client-identifier.network')
@@ -5177,8 +5333,6 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertIn('DHCPREPLY(veth-peer)', output)
         self.assertIn('sent size:  0 option: 14 rapid-commit', output)
 
-        stop_dnsmasq()
-
     def test_dhcp_client_ipv4_only(self):
         copy_network_unit('25-veth.netdev', '25-dhcp-server-veth-peer.network', '25-dhcp-client-ipv4-only.network')
 
@@ -5189,6 +5343,7 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         start_networkd()
         self.wait_online(['veth-peer:carrier'])
         start_dnsmasq('--dhcp-option=option:dns-server,192.168.5.6,192.168.5.7',
+                      '--dhcp-option=option:sip-server,192.168.5.21,192.168.5.22',
                       '--dhcp-option=option:domain-search,example.com',
                       '--dhcp-alternate-port=67,5555',
                       ipv4_range='192.168.5.110,192.168.5.119')
@@ -5203,6 +5358,16 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertRegex(output, r'inet 192.168.5.11[0-9]/24 metric 24 brd 192.168.5.255 scope global secondary dynamic noprefixroute test-label')
         self.assertNotIn('2600::', output)
 
+        output = check_output('ip -4 --json address show dev veth99')
+        for i in json.loads(output)[0]['addr_info']:
+            if i['label'] == 'test-label':
+                address1 = i['local']
+                break
+        else:
+            self.assertFalse(True)
+
+        self.assertRegex(address1, r'^192.168.5.11[0-9]$')
+
         print('## ip route show table main dev veth99')
         output = check_output('ip route show table main dev veth99')
         print(output)
@@ -5217,38 +5382,64 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         print('## ip route show table 211 dev veth99')
         output = check_output('ip route show table 211 dev veth99')
         print(output)
-        self.assertRegex(output, 'default via 192.168.5.1 proto dhcp src 192.168.5.11[0-9] metric 24')
-        self.assertRegex(output, '192.168.5.0/24 proto dhcp scope link src 192.168.5.11[0-9] metric 24')
-        self.assertRegex(output, '192.168.5.1 proto dhcp scope link src 192.168.5.11[0-9] metric 24')
-        self.assertRegex(output, '192.168.5.6 proto dhcp scope link src 192.168.5.11[0-9] metric 24')
-        self.assertRegex(output, '192.168.5.7 proto dhcp scope link src 192.168.5.11[0-9] metric 24')
+        self.assertRegex(output, f'default via 192.168.5.1 proto dhcp src {address1} metric 24')
+        self.assertRegex(output, f'192.168.5.0/24 proto dhcp scope link src {address1} metric 24')
+        self.assertRegex(output, f'192.168.5.1 proto dhcp scope link src {address1} metric 24')
+        self.assertRegex(output, f'192.168.5.6 proto dhcp scope link src {address1} metric 24')
+        self.assertRegex(output, f'192.168.5.7 proto dhcp scope link src {address1} metric 24')
         self.assertIn('10.0.0.0/8 via 192.168.5.1 proto dhcp', output)
 
         print('## link state file')
         output = read_link_state_file('veth99')
         print(output)
-        # checking DNS server and Domains
+        # checking DNS server, SIP server, and Domains
         self.assertIn('DNS=192.168.5.6 192.168.5.7', output)
+        self.assertIn('SIP=192.168.5.21 192.168.5.22', output)
         self.assertIn('DOMAINS=example.com', output)
+
+        print('## json')
+        output = check_output(*networkctl_cmd, '--json=short', 'status', 'veth99', env=env)
+        j = json.loads(output)
+
+        self.assertEqual(len(j['DNS']), 2)
+        for i in j['DNS']:
+            print(i)
+            self.assertEqual(i['Family'], 2)
+            a = socket.inet_ntop(socket.AF_INET, bytearray(i['Address']))
+            self.assertRegex(a, '^192.168.5.[67]$')
+            self.assertEqual(i['ConfigSource'], 'DHCPv4')
+            a = socket.inet_ntop(socket.AF_INET, bytearray(i['ConfigProvider']))
+            self.assertEqual('192.168.5.1', a)
+
+        self.assertEqual(len(j['SIP']), 2)
+        for i in j['SIP']:
+            print(i)
+            self.assertEqual(i['Family'], 2)
+            a = socket.inet_ntop(socket.AF_INET, bytearray(i['Address']))
+            self.assertRegex(a, '^192.168.5.2[12]$')
+            self.assertEqual(i['ConfigSource'], 'DHCPv4')
+            a = socket.inet_ntop(socket.AF_INET, bytearray(i['ConfigProvider']))
+            self.assertEqual('192.168.5.1', a)
 
         print('## dnsmasq log')
         output = read_dnsmasq_log_file()
         print(output)
         self.assertIn('vendor class: FooBarVendorTest', output)
-        self.assertIn('DHCPDISCOVER(veth-peer) 12:34:56:78:9a:bc', output)
+        self.assertIn('DHCPDISCOVER(veth-peer) 192.168.5.110 12:34:56:78:9a:bc', output)
         self.assertIn('client provides name: test-hostname', output)
         self.assertIn('26:mtu', output)
 
         # change address range, DNS servers, and Domains
         stop_dnsmasq()
         start_dnsmasq('--dhcp-option=option:dns-server,192.168.5.1,192.168.5.7,192.168.5.8',
+                      '--dhcp-option=option:sip-server,192.168.5.23,192.168.5.24',
                       '--dhcp-option=option:domain-search,foo.example.com',
                       '--dhcp-alternate-port=67,5555',
                       ipv4_range='192.168.5.120,192.168.5.129',)
 
         # Sleep for 120 sec as the dnsmasq minimum lease time can only be set to 120
         print('Wait for the DHCP lease to be expired')
-        self.wait_address_dropped('veth99', r'inet 192.168.5.11[0-9]*/24', ipv='-4', timeout_sec=120)
+        self.wait_address_dropped('veth99', f'inet {address1}/24', ipv='-4', timeout_sec=120)
         self.wait_address('veth99', r'inet 192.168.5.12[0-9]*/24', ipv='-4')
 
         self.wait_online(['veth99:routable', 'veth-peer:routable'])
@@ -5258,9 +5449,19 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         print(output)
         self.assertIn('mtu 1492', output)
         self.assertIn('inet 192.168.5.250/24 brd 192.168.5.255 scope global veth99', output)
-        self.assertNotIn('192.168.5.11', output)
+        self.assertNotIn(f'{address1}', output)
         self.assertRegex(output, r'inet 192.168.5.12[0-9]/24 metric 24 brd 192.168.5.255 scope global secondary dynamic noprefixroute test-label')
         self.assertNotIn('2600::', output)
+
+        output = check_output('ip -4 --json address show dev veth99')
+        for i in json.loads(output)[0]['addr_info']:
+            if i['label'] == 'test-label':
+                address2 = i['local']
+                break
+        else:
+            self.assertFalse(True)
+
+        self.assertRegex(address2, r'^192.168.5.12[0-9]$')
 
         print('## ip route show table main dev veth99')
         output = check_output('ip route show table main dev veth99')
@@ -5276,26 +5477,51 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         print('## ip route show table 211 dev veth99')
         output = check_output('ip route show table 211 dev veth99')
         print(output)
-        self.assertRegex(output, 'default via 192.168.5.1 proto dhcp src 192.168.5.12[0-9] metric 24')
-        self.assertRegex(output, '192.168.5.0/24 proto dhcp scope link src 192.168.5.12[0-9] metric 24')
-        self.assertRegex(output, '192.168.5.1 proto dhcp scope link src 192.168.5.12[0-9] metric 24')
+        self.assertRegex(output, f'default via 192.168.5.1 proto dhcp src {address2} metric 24')
+        self.assertRegex(output, f'192.168.5.0/24 proto dhcp scope link src {address2} metric 24')
+        self.assertRegex(output, f'192.168.5.1 proto dhcp scope link src {address2} metric 24')
         self.assertNotIn('192.168.5.6', output)
-        self.assertRegex(output, '192.168.5.7 proto dhcp scope link src 192.168.5.12[0-9] metric 24')
-        self.assertRegex(output, '192.168.5.8 proto dhcp scope link src 192.168.5.12[0-9] metric 24')
+        self.assertRegex(output, f'192.168.5.7 proto dhcp scope link src {address2} metric 24')
+        self.assertRegex(output, f'192.168.5.8 proto dhcp scope link src {address2} metric 24')
         self.assertIn('10.0.0.0/8 via 192.168.5.1 proto dhcp', output)
 
         print('## link state file')
         output = read_link_state_file('veth99')
         print(output)
-        # checking DNS server and Domains
+        # checking DNS server, SIP server, and Domains
         self.assertIn('DNS=192.168.5.1 192.168.5.7 192.168.5.8', output)
+        self.assertIn('SIP=192.168.5.23 192.168.5.24', output)
         self.assertIn('DOMAINS=foo.example.com', output)
+
+        print('## json')
+        output = check_output(*networkctl_cmd, '--json=short', 'status', 'veth99', env=env)
+        j = json.loads(output)
+
+        self.assertEqual(len(j['DNS']), 3)
+        for i in j['DNS']:
+            print(i)
+            self.assertEqual(i['Family'], 2)
+            a = socket.inet_ntop(socket.AF_INET, bytearray(i['Address']))
+            self.assertRegex(a, '^192.168.5.[178]$')
+            self.assertEqual(i['ConfigSource'], 'DHCPv4')
+            a = socket.inet_ntop(socket.AF_INET, bytearray(i['ConfigProvider']))
+            self.assertEqual('192.168.5.1', a)
+
+        self.assertEqual(len(j['SIP']), 2)
+        for i in j['SIP']:
+            print(i)
+            self.assertEqual(i['Family'], 2)
+            a = socket.inet_ntop(socket.AF_INET, bytearray(i['Address']))
+            self.assertRegex(a, '^192.168.5.2[34]$')
+            self.assertEqual(i['ConfigSource'], 'DHCPv4')
+            a = socket.inet_ntop(socket.AF_INET, bytearray(i['ConfigProvider']))
+            self.assertEqual('192.168.5.1', a)
 
         print('## dnsmasq log')
         output = read_dnsmasq_log_file()
         print(output)
         self.assertIn('vendor class: FooBarVendorTest', output)
-        self.assertIn('DHCPDISCOVER(veth-peer) 192.168.5.11', output)
+        self.assertIn(f'DHCPDISCOVER(veth-peer) {address1} 12:34:56:78:9a:bc', output)
         self.assertIn('client provides name: test-hostname', output)
         self.assertIn('26:mtu', output)
 
@@ -5308,34 +5534,13 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.teardown_nftset('addr4', 'network4', 'ifindex')
 
     def test_dhcp_client_ipv4_dbus_status(self):
-        def get_dbus_dhcp4_client_state(IF):
-            out = subprocess.check_output(['busctl', 'call', 'org.freedesktop.network1',
-                                           '/org/freedesktop/network1', 'org.freedesktop.network1.Manager',
-                                           'GetLinkByName', 's', IF])
-
-            assert out.startswith(b'io ')
-            out = out.strip()
-            assert out.endswith(b'"')
-            out = out.decode()
-            linkPath = out[:-1].split('"')[1]
-
-            print(f"Found {IF} link path: {linkPath}")
-
-            out = subprocess.check_output(['busctl', 'get-property', 'org.freedesktop.network1',
-                                           linkPath, 'org.freedesktop.network1.DHCPv4Client', 'State'])
-            assert out.startswith(b's "')
-            out = out.strip()
-            assert out.endswith(b'"')
-            return out[3:-1].decode()
-
         copy_network_unit('25-veth.netdev', '25-dhcp-server-veth-peer.network', '25-dhcp-client-ipv4-only.network')
-
         start_networkd()
         self.wait_online(['veth-peer:carrier'])
 
-        state = get_dbus_dhcp4_client_state('veth99')
+        state = get_dhcp4_client_state('veth99')
         print(f"State = {state}")
-        self.assertEqual(state, 'selecting')
+        self.assertEqual(state, 'rebooting')
 
         start_dnsmasq('--dhcp-option=option:dns-server,192.168.5.6,192.168.5.7',
                       '--dhcp-option=option:domain-search,example.com',
@@ -5344,7 +5549,19 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.wait_online(['veth99:routable', 'veth-peer:routable'])
         self.wait_address('veth99', r'inet 192.168.5.11[0-9]*/24', ipv='-4')
 
-        state = get_dbus_dhcp4_client_state('veth99')
+        state = get_dhcp4_client_state('veth99')
+        print(f"State = {state}")
+        self.assertEqual(state, 'bound')
+
+    def test_dhcp_client_ipv6_only_mode_without_ipv6_connectivity(self):
+        copy_network_unit('25-veth.netdev',
+                          '25-dhcp-server-ipv6-only-mode.network',
+                          '25-dhcp-client-ipv6-only-mode.network')
+        start_networkd()
+        self.wait_online(['veth99:routable', 'veth-peer:routable'], timeout='40s')
+        self.wait_address('veth99', r'inet 192.168.5.[0-9]*/24', ipv='-4')
+
+        state = get_dhcp4_client_state('veth99')
         print(f"State = {state}")
         self.assertEqual(state, 'bound')
 
@@ -5796,30 +6013,8 @@ class NetworkdDHCPPDTests(unittest.TestCase, Utilities):
         tear_down_common()
 
     def test_dhcp6pd(self):
-        def get_dbus_dhcp6_prefix(IF):
-            # busctl call org.freedesktop.network1 /org/freedesktop/network1 org.freedesktop.network1.Manager GetLinkByName s IF
-            out = subprocess.check_output(['busctl', 'call', 'org.freedesktop.network1',
-                                           '/org/freedesktop/network1', 'org.freedesktop.network1.Manager',
-                                           'GetLinkByName', 's', IF])
-
-            assert out.startswith(b'io ')
-            out = out.strip()
-            assert out.endswith(b'"')
-            out = out.decode()
-            linkPath = out[:-1].split('"')[1]
-
-            print(f"Found {IF} link path: {linkPath}")
-
-            out = subprocess.check_output(['busctl', 'call', 'org.freedesktop.network1',
-                                           linkPath, 'org.freedesktop.network1.Link', 'Describe'])
-            assert out.startswith(b's "')
-            out = out.strip()
-            assert out.endswith(b'"')
-            json_raw = out[2:].decode()
-            check_json(json_raw)
-            description = json.loads(json_raw) # Convert from escaped sequences to json
-            check_json(description)
-            description = json.loads(description) # Now parse the json
+        def get_dhcp6_prefix(link):
+            description = get_link_description(link)
 
             self.assertIn('DHCPv6Client', description.keys())
             self.assertIn('Prefixes', description['DHCPv6Client'])
@@ -5847,7 +6042,7 @@ class NetworkdDHCPPDTests(unittest.TestCase, Utilities):
                           'veth97:routable', 'veth97-peer:routable', 'veth98:routable', 'veth98-peer:routable'])
 
         # Check DBus assigned prefix information to veth99
-        prefixInfo = get_dbus_dhcp6_prefix('veth99')
+        prefixInfo = get_dhcp6_prefix('veth99')
 
         self.assertEqual(len(prefixInfo), 1)
         prefixInfo = prefixInfo[0]
@@ -6230,29 +6425,8 @@ class NetworkdDHCPPDTests(unittest.TestCase, Utilities):
         self.assertIn(f'via ::10.0.0.1 dev {tunnel_name}', output)
 
     def test_dhcp4_6rd(self):
-        def get_dbus_dhcp_6rd_prefix(IF):
-            out = subprocess.check_output(['busctl', 'call', 'org.freedesktop.network1',
-                                           '/org/freedesktop/network1', 'org.freedesktop.network1.Manager',
-                                           'GetLinkByName', 's', IF])
-
-            assert out.startswith(b'io ')
-            out = out.strip()
-            assert out.endswith(b'"')
-            out = out.decode()
-            linkPath = out[:-1].split('"')[1]
-
-            print(f"Found {IF} link path: {linkPath}")
-
-            out = subprocess.check_output(['busctl', 'call', 'org.freedesktop.network1',
-                                           linkPath, 'org.freedesktop.network1.Link', 'Describe'])
-            assert out.startswith(b's "')
-            out = out.strip()
-            assert out.endswith(b'"')
-            json_raw = out[2:].decode()
-            check_json(json_raw)
-            description = json.loads(json_raw) # Convert from escaped sequences to json
-            check_json(description)
-            description = json.loads(description) # Now parse the json
+        def get_dhcp_6rd_prefix(link):
+            description = get_link_description(link)
 
             self.assertIn('DHCPv4Client', description.keys())
             self.assertIn('6rdPrefix', description['DHCPv4Client'].keys())
@@ -6288,7 +6462,7 @@ class NetworkdDHCPPDTests(unittest.TestCase, Utilities):
                           'veth97:routable', 'veth97-peer:routable', 'veth98:routable', 'veth98-peer:routable'])
 
         # Check the DBus interface for assigned prefix information
-        prefixInfo = get_dbus_dhcp_6rd_prefix('veth99')
+        prefixInfo = get_dhcp_6rd_prefix('veth99')
 
         self.assertEqual(prefixInfo['Prefix'], [32,1,13,184,0,0,0,0,0,0,0,0,0,0,0,0]) # 2001:db8::
         self.assertEqual(prefixInfo['PrefixLength'], 32)
