@@ -292,10 +292,10 @@ static int parse_as_address(Varlink *link, LookupParameters *p) {
 
 static int vl_method_resolve_hostname(Varlink *link, JsonVariant *parameters, VarlinkMethodFlags flags, void *userdata) {
         static const JsonDispatch dispatch_table[] = {
-                { "ifindex", JSON_VARIANT_UNSIGNED, json_dispatch_int,    offsetof(LookupParameters, ifindex), 0              },
-                { "name",    JSON_VARIANT_STRING,   json_dispatch_string, offsetof(LookupParameters, name),    JSON_MANDATORY },
-                { "family",  JSON_VARIANT_UNSIGNED, json_dispatch_int,    offsetof(LookupParameters, family),  0              },
-                { "flags",   JSON_VARIANT_UNSIGNED, json_dispatch_uint64, offsetof(LookupParameters, flags),   0              },
+                { "ifindex", _JSON_VARIANT_TYPE_INVALID, json_dispatch_int,    offsetof(LookupParameters, ifindex), 0              },
+                { "name",    JSON_VARIANT_STRING,        json_dispatch_string, offsetof(LookupParameters, name),    JSON_MANDATORY },
+                { "family",  _JSON_VARIANT_TYPE_INVALID, json_dispatch_int,    offsetof(LookupParameters, family),  0              },
+                { "flags",   _JSON_VARIANT_TYPE_INVALID, json_dispatch_uint64, offsetof(LookupParameters, flags),   0              },
                 {}
         };
 
@@ -315,8 +315,8 @@ static int vl_method_resolve_hostname(Varlink *link, JsonVariant *parameters, Va
         if (FLAGS_SET(flags, VARLINK_METHOD_ONEWAY))
                 return -EINVAL;
 
-        r = json_dispatch(parameters, dispatch_table, NULL, 0, &p);
-        if (r < 0)
+        r = varlink_dispatch(link, parameters, dispatch_table, &p);
+        if (r != 0)
                 return r;
 
         if (p.ifindex < 0)
@@ -468,10 +468,10 @@ finish:
 
 static int vl_method_resolve_address(Varlink *link, JsonVariant *parameters, VarlinkMethodFlags flags, void *userdata) {
         static const JsonDispatch dispatch_table[] = {
-                { "ifindex", JSON_VARIANT_UNSIGNED, json_dispatch_int,     offsetof(LookupParameters, ifindex), 0              },
-                { "family",  JSON_VARIANT_UNSIGNED, json_dispatch_int,     offsetof(LookupParameters, family),  JSON_MANDATORY },
-                { "address", JSON_VARIANT_ARRAY,    json_dispatch_address, 0,                                   JSON_MANDATORY },
-                { "flags",   JSON_VARIANT_UNSIGNED, json_dispatch_uint64,  offsetof(LookupParameters, flags),   0              },
+                { "ifindex", _JSON_VARIANT_TYPE_INVALID, json_dispatch_int,     offsetof(LookupParameters, ifindex), 0              },
+                { "family",  _JSON_VARIANT_TYPE_INVALID, json_dispatch_int,     offsetof(LookupParameters, family),  JSON_MANDATORY },
+                { "address", JSON_VARIANT_ARRAY,         json_dispatch_address, 0,                                   JSON_MANDATORY },
+                { "flags",   _JSON_VARIANT_TYPE_INVALID, json_dispatch_uint64,  offsetof(LookupParameters, flags),   0              },
                 {}
         };
 
@@ -491,8 +491,8 @@ static int vl_method_resolve_address(Varlink *link, JsonVariant *parameters, Var
         if (FLAGS_SET(flags, VARLINK_METHOD_ONEWAY))
                 return -EINVAL;
 
-        r = json_dispatch(parameters, dispatch_table, NULL, 0, &p);
-        if (r < 0)
+        r = varlink_dispatch(link, parameters, dispatch_table, &p);
+        if (r != 0)
                 return r;
 
         if (p.ifindex < 0)

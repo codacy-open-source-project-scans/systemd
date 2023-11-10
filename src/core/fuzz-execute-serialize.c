@@ -26,24 +26,17 @@
 #include "service.h"
 
 static void exec_fuzz_one(FILE *f, FDSet *fdset) {
-        _cleanup_(exec_params_serialized_done) ExecParameters params = {
-                .stdin_fd         = -EBADF,
-                .stdout_fd        = -EBADF,
-                .stderr_fd        = -EBADF,
-                .exec_fd          = -EBADF,
-                .user_lookup_fd   = -EBADF,
-                .bpf_outer_map_fd = -EBADF,
-        };
+        _cleanup_(exec_params_deep_clear) ExecParameters params = EXEC_PARAMETERS_INIT(/* flags= */ 0);
         _cleanup_(exec_context_done) ExecContext exec_context = {};
         _cleanup_(cgroup_context_done) CGroupContext cgroup_context = {};
         DynamicCreds dynamic_creds = {};
         ExecCommand command = {};
         ExecSharedRuntime shared = {
-                .netns_storage_socket = PIPE_EBADF,
-                .ipcns_storage_socket = PIPE_EBADF,
+                .netns_storage_socket = EBADF_PAIR,
+                .ipcns_storage_socket = EBADF_PAIR,
         };
         ExecRuntime runtime = {
-                .ephemeral_storage_socket = PIPE_EBADF,
+                .ephemeral_storage_socket = EBADF_PAIR,
                 .shared = &shared,
                 .dynamic_creds = &dynamic_creds,
         };
@@ -81,6 +74,9 @@ static void exec_fuzz_one(FILE *f, FDSet *fdset) {
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_fdset_free_ FDSet *fdset = NULL;
+
+        if (outside_size_range(size, 0, 128 * 1024))
+                return 0;
 
         fuzz_setup_logging();
 

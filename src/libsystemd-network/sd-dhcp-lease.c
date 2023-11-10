@@ -33,6 +33,15 @@
 #include "tmpfile-util.h"
 #include "unaligned.h"
 
+void dhcp_lease_set_timestamp(sd_dhcp_lease *lease, const triple_timestamp *timestamp) {
+        assert(lease);
+
+        if (timestamp && triple_timestamp_is_set(timestamp))
+                lease->timestamp = *timestamp;
+        else
+                triple_timestamp_get(&lease->timestamp);
+}
+
 int sd_dhcp_lease_get_timestamp(sd_dhcp_lease *lease, clockid_t clock, uint64_t *ret) {
         assert_return(lease, -EINVAL);
         assert_return(TRIPLE_TIMESTAMP_HAS_CLOCK(clock), -EOPNOTSUPP);
@@ -733,6 +742,12 @@ int dhcp_lease_parse_options(uint8_t code, uint8_t len, const void *option, void
                 r = lease_parse_in_addrs(option, len, &lease->router, &lease->router_size);
                 if (r < 0)
                         log_debug_errno(r, "Failed to parse router addresses, ignoring: %m");
+                break;
+
+        case SD_DHCP_OPTION_RAPID_COMMIT:
+                if (len > 0)
+                        log_debug("Invalid DHCP Rapid Commit option, ignoring.");
+                lease->rapid_commit = true;
                 break;
 
         case SD_DHCP_OPTION_DOMAIN_NAME_SERVER:

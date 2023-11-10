@@ -152,6 +152,7 @@ static Tpm2PCRValue *arg_tpm2_hash_pcr_values = NULL;
 static size_t arg_tpm2_n_hash_pcr_values = 0;
 static char *arg_tpm2_public_key = NULL;
 static uint32_t arg_tpm2_public_key_pcr_mask = 0;
+static char *arg_tpm2_pcrlock = NULL;
 static bool arg_split = false;
 static GptPartitionType *arg_filter_partitions = NULL;
 static size_t arg_n_filter_partitions = 0;
@@ -175,6 +176,7 @@ STATIC_DESTRUCTOR_REGISTER(arg_certificate, X509_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_tpm2_device, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_tpm2_hash_pcr_values, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_tpm2_public_key, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_tpm2_pcrlock, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_filter_partitions, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_image_policy, image_policy_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_copy_from, strv_freep);
@@ -1684,10 +1686,10 @@ static int partition_read_definition(Partition *p, const char *path, const char 
                 { "Partition", "Priority",                 config_parse_int32,         0, &p->priority                },
                 { "Partition", "Weight",                   config_parse_weight,        0, &p->weight                  },
                 { "Partition", "PaddingWeight",            config_parse_weight,        0, &p->padding_weight          },
-                { "Partition", "SizeMinBytes",             config_parse_size4096,      1, &p->size_min                },
-                { "Partition", "SizeMaxBytes",             config_parse_size4096,     -1, &p->size_max                },
-                { "Partition", "PaddingMinBytes",          config_parse_size4096,      1, &p->padding_min             },
-                { "Partition", "PaddingMaxBytes",          config_parse_size4096,     -1, &p->padding_max             },
+                { "Partition", "SizeMinBytes",             config_parse_size4096,     -1, &p->size_min                },
+                { "Partition", "SizeMaxBytes",             config_parse_size4096,      1, &p->size_max                },
+                { "Partition", "PaddingMinBytes",          config_parse_size4096,     -1, &p->padding_min             },
+                { "Partition", "PaddingMaxBytes",          config_parse_size4096,      1, &p->padding_max             },
                 { "Partition", "FactoryReset",             config_parse_bool,          0, &p->factory_reset           },
                 { "Partition", "CopyBlocks",               config_parse_copy_blocks,   0, p                           },
                 { "Partition", "Format",                   config_parse_fstype,        0, &p->format                  },
@@ -3781,7 +3783,7 @@ static int partition_encrypt(Context *context, Partition *p, PartitionTarget *ta
                         r = tpm2_load_pcr_public_key(arg_tpm2_public_key, &pubkey, &pubkey_size);
                         if (r < 0) {
                                 if (arg_tpm2_public_key || r != -ENOENT)
-                                        return log_error_errno(r, "Failed read TPM PCR public key: %m");
+                                        return log_error_errno(r, "Failed to read TPM PCR public key: %m");
 
                                 log_debug_errno(r, "Failed to read TPM2 PCR public key, proceeding without: %m");
                                 arg_tpm2_public_key_pcr_mask = 0;
@@ -3821,8 +3823,21 @@ static int partition_encrypt(Context *context, Partition *p, PartitionTarget *ta
                                 return log_error_errno(r, "Could not get hash mask: %m");
                 }
 
+                _cleanup_(tpm2_pcrlock_policy_done) Tpm2PCRLockPolicy pcrlock_policy = {};
+                if (arg_tpm2_pcrlock) {
+                        r = tpm2_pcrlock_policy_load(arg_tpm2_pcrlock, &pcrlock_policy);
+                        if (r < 0)
+                                return r;
+                }
+
                 TPM2B_DIGEST policy = TPM2B_DIGEST_MAKE(NULL, TPM2_SHA256_DIGEST_SIZE);
-                r = tpm2_calculate_sealing_policy(arg_tpm2_hash_pcr_values, arg_tpm2_n_hash_pcr_values, pubkey ? &public : NULL, /* use_pin= */ false, &policy);
+                r = tpm2_calculate_sealing_policy(
+                                arg_tpm2_hash_pcr_values,
+                                arg_tpm2_n_hash_pcr_values,
+                                pubkey ? &public : NULL,
+                                /* use_pin= */ false,
+                                arg_tpm2_pcrlock ? &pcrlock_policy : NULL,
+                                &policy);
                 if (r < 0)
                         return log_error_errno(r, "Could not calculate sealing policy digest: %m");
 
@@ -4673,7 +4688,7 @@ static int partition_populate_filesystem(Context *context, Partition *p, const c
          * appear in the host namespace. Hence we fork a child that has its own file system namespace and
          * detached mount propagation. */
 
-        r = safe_fork("(sd-copy)", FORK_DEATHSIG|FORK_LOG|FORK_WAIT|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE, NULL);
+        r = safe_fork("(sd-copy)", FORK_DEATHSIG_SIGTERM|FORK_LOG|FORK_WAIT|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE, NULL);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -6380,6 +6395,8 @@ static int help(void) {
                "                          Enroll signed TPM2 PCR policy against PEM public key\n"
                "     --tpm2-public-key-pcrs=PCR1+PCR2+PCR3+…\n"
                "                          Enroll signed TPM2 PCR policy for specified TPM2 PCRs\n"
+               "     --tpm2-pcrlock=PATH\n"
+               "                          Specify pcrlock policy to lock against\n"
                "     --seed=UUID          128-bit seed UUID to derive all UUIDs from\n"
                "     --size=BYTES         Grow loopback file to specified size\n"
                "     --json=pretty|short|off\n"
@@ -6435,6 +6452,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_TPM2_PCRS,
                 ARG_TPM2_PUBLIC_KEY,
                 ARG_TPM2_PUBLIC_KEY_PCRS,
+                ARG_TPM2_PCRLOCK,
                 ARG_SPLIT,
                 ARG_INCLUDE_PARTITIONS,
                 ARG_EXCLUDE_PARTITIONS,
@@ -6472,6 +6490,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "tpm2-pcrs",            required_argument, NULL, ARG_TPM2_PCRS            },
                 { "tpm2-public-key",      required_argument, NULL, ARG_TPM2_PUBLIC_KEY      },
                 { "tpm2-public-key-pcrs", required_argument, NULL, ARG_TPM2_PUBLIC_KEY_PCRS },
+                { "tpm2-pcrlock",         required_argument, NULL, ARG_TPM2_PCRLOCK         },
                 { "split",                required_argument, NULL, ARG_SPLIT                },
                 { "include-partitions",   required_argument, NULL, ARG_INCLUDE_PARTITIONS   },
                 { "exclude-partitions",   required_argument, NULL, ARG_EXCLUDE_PARTITIONS   },
@@ -6485,7 +6504,7 @@ static int parse_argv(int argc, char *argv[]) {
                 {}
         };
 
-        bool auto_hash_pcr_values = true, auto_public_key_pcr_mask = true;
+        bool auto_hash_pcr_values = true, auto_public_key_pcr_mask = true, auto_pcrlock = true;
         int c, r;
 
         assert(argc >= 0);
@@ -6728,6 +6747,14 @@ static int parse_argv(int argc, char *argv[]) {
 
                         break;
 
+                case ARG_TPM2_PCRLOCK:
+                        r = parse_path_argument(optarg, /* suppress_root= */ false, &arg_tpm2_pcrlock);
+                        if (r < 0)
+                                return r;
+
+                        auto_pcrlock = false;
+                        break;
+
                 case ARG_SPLIT:
                         r = parse_boolean_argument("--split=", optarg, NULL);
                         if (r < 0)
@@ -6935,12 +6962,23 @@ static int parse_argv(int argc, char *argv[]) {
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "A path to an image file must be specified when --split is used.");
 
-        if (auto_public_key_pcr_mask && arg_tpm2_public_key) {
+        if (auto_pcrlock) {
+                assert(!arg_tpm2_pcrlock);
+
+                r = tpm2_pcrlock_search_file(NULL, NULL, &arg_tpm2_pcrlock);
+                if (r < 0) {
+                        if (r != -ENOENT)
+                                log_warning_errno(r, "Search for pcrlock.json failed, assuming it does not exist: %m");
+                } else
+                        log_info("Automatically using pcrlock policy '%s'.", arg_tpm2_pcrlock);
+        }
+
+        if (auto_public_key_pcr_mask) {
                 assert(arg_tpm2_public_key_pcr_mask == 0);
                 arg_tpm2_public_key_pcr_mask = INDEX_TO_MASK(uint32_t, TPM2_PCR_KERNEL_BOOT);
         }
 
-        if (auto_hash_pcr_values) {
+        if (auto_hash_pcr_values && !arg_tpm2_pcrlock) { /* Only lock to PCR 7 if no pcr policy is specified. */
                 assert(arg_tpm2_n_hash_pcr_values == 0);
 
                 if (!GREEDY_REALLOC_APPEND(

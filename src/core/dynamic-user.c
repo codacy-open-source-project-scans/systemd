@@ -79,7 +79,7 @@ static int dynamic_user_add(Manager *m, const char *name, int storage_socket[sta
 }
 
 static int dynamic_user_acquire(Manager *m, const char *name, DynamicUser** ret) {
-        _cleanup_close_pair_ int storage_socket[2] = PIPE_EBADF;
+        _cleanup_close_pair_ int storage_socket[2] = EBADF_PAIR;
         DynamicUser *d;
         int r;
 
@@ -857,4 +857,15 @@ void dynamic_creds_done(DynamicCreds *creds) {
         if (creds->group != creds->user)
                 dynamic_user_free(creds->group);
         creds->group = creds->user = dynamic_user_free(creds->user);
+}
+
+void dynamic_creds_close(DynamicCreds *creds) {
+        if (!creds)
+                return;
+
+        if (creds->user)
+                safe_close_pair(creds->user->storage_socket);
+
+        if (creds->group && creds->group != creds->user)
+                safe_close_pair(creds->group->storage_socket);
 }

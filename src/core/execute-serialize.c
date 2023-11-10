@@ -2968,9 +2968,9 @@ static int exec_context_deserialize(ExecContext *c, FILE *f) {
                                 return r;
                         c->ioprio_set = true;
                 } else if ((val = startswith(l, "exec-context-cpu-scheduling-policy="))) {
-                        r = sched_policy_from_string(val);
-                        if (r < 0)
-                                return r;
+                        c->cpu_sched_policy = sched_policy_from_string(val);
+                        if (c->cpu_sched_policy < 0)
+                                return -EINVAL;
                         c->cpu_sched_set = true;
                 } else if ((val = startswith(l, "exec-context-cpu-scheduling-priority="))) {
                         r = safe_atoi(val, &c->cpu_sched_priority);
@@ -3395,9 +3395,11 @@ static int exec_context_deserialize(ExecContext *c, FILE *f) {
                         r = free_and_strdup(&c->smack_process_label, val);
                         if (r < 0)
                                 return r;
-                } else if ((val = startswith(l, "exec-context-personality=")))
+                } else if ((val = startswith(l, "exec-context-personality="))) {
                         c->personality = personality_from_string(val);
-                else if ((val = startswith(l, "exec-context-lock-personality="))) {
+                        if (c->personality == PERSONALITY_INVALID)
+                                return -EINVAL;
+                } else if ((val = startswith(l, "exec-context-lock-personality="))) {
                         r = parse_boolean(val);
                         if (r < 0)
                                 return r;

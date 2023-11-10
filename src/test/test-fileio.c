@@ -145,7 +145,7 @@ TEST(parse_env_file) {
                 assert_se(fd >= 0);
         }
 
-        r = write_env_file(p, a);
+        r = write_env_file(AT_FDCWD, p, NULL, a);
         assert_se(r >= 0);
 
         r = load_env_file(NULL, p, &b);
@@ -208,7 +208,7 @@ TEST(parse_multiline_env_file) {
                 assert_se(fd >= 0);
         }
 
-        r = write_env_file(p, a);
+        r = write_env_file(AT_FDCWD, p, NULL, a);
         assert_se(r >= 0);
 
         r = load_env_file(NULL, p, &b);
@@ -969,7 +969,7 @@ TEST(read_full_file_socket) {
         /* Bind the *client* socket to some randomized name, to verify that this works correctly. */
         assert_se(asprintf(&clientname, "@%" PRIx64 "/test-bindname", random_u64()) >= 0);
 
-        r = safe_fork("(server)", FORK_DEATHSIG|FORK_LOG, &pid);
+        r = safe_fork("(server)", FORK_DEATHSIG_SIGTERM|FORK_LOG, &pid);
         assert_se(r >= 0);
         if (r == 0) {
                 union sockaddr_union peer = {};

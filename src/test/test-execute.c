@@ -585,7 +585,7 @@ static int find_libraries(const char *exec, char ***ret) {
         _cleanup_(sd_event_source_unrefp) sd_event_source *sigchld_source = NULL;
         _cleanup_(sd_event_source_unrefp) sd_event_source *stdout_source = NULL;
         _cleanup_(sd_event_source_unrefp) sd_event_source *stderr_source = NULL;
-        _cleanup_close_pair_ int outpipe[2] = PIPE_EBADF, errpipe[2] = PIPE_EBADF;
+        _cleanup_close_pair_ int outpipe[2] = EBADF_PAIR, errpipe[2] = EBADF_PAIR;
         _cleanup_strv_free_ char **libraries = NULL;
         _cleanup_free_ char *result = NULL;
         pid_t pid;
@@ -602,7 +602,7 @@ static int find_libraries(const char *exec, char ***ret) {
         r = safe_fork_full("(spawn-ldd)",
                            (int[]) { -EBADF, outpipe[1], errpipe[1] },
                            NULL, 0,
-                           FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG|FORK_REARRANGE_STDIO|FORK_LOG, &pid);
+                           FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_REARRANGE_STDIO|FORK_LOG, &pid);
         assert_se(r >= 0);
         if (r == 0) {
                 execlp("ldd", "ldd", exec, NULL);
@@ -754,6 +754,18 @@ static void test_exec_systemcallfilter(Manager *m) {
         test(m, "exec-systemcallfilter-with-errno-in-allow-list.service", errno_from_name("EILSEQ"), CLD_EXITED);
         test(m, "exec-systemcallfilter-override-error-action.service", SIGSYS, CLD_KILLED);
         test(m, "exec-systemcallfilter-override-error-action2.service", errno_from_name("EILSEQ"), CLD_EXITED);
+
+        test(m, "exec-systemcallfilter-nonewprivileges.service", MANAGER_IS_SYSTEM(m) ? 0 : EXIT_GROUP, CLD_EXITED);
+        test(m, "exec-systemcallfilter-nonewprivileges-protectclock.service", MANAGER_IS_SYSTEM(m) ? 0 : EXIT_GROUP, CLD_EXITED);
+
+        r = find_executable("capsh", NULL);
+        if (r < 0) {
+                log_notice_errno(r, "Skipping %s, could not find capsh binary: %m", __func__);
+                return;
+        }
+
+        test(m, "exec-systemcallfilter-nonewprivileges-bounding1.service", MANAGER_IS_SYSTEM(m) ? 0 : EXIT_GROUP, CLD_EXITED);
+        test(m, "exec-systemcallfilter-nonewprivileges-bounding2.service", MANAGER_IS_SYSTEM(m) ? 0 : EXIT_GROUP, CLD_EXITED);
 #endif
 }
 
@@ -1299,7 +1311,7 @@ static int prepare_ns(const char *process_name) {
         r = safe_fork(process_name,
                       FORK_RESET_SIGNALS |
                       FORK_CLOSE_ALL_FDS |
-                      FORK_DEATHSIG |
+                      FORK_DEATHSIG_SIGTERM |
                       FORK_WAIT |
                       FORK_REOPEN_LOG |
                       FORK_LOG |

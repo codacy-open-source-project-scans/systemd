@@ -54,7 +54,7 @@ External:
   - init=/bin/sh vs. "emergency" mode, vs. "rescue" mode, vs. "multi-user" mode, vs. "graphical" mode, and the debug shell
   - how to create your own target
   - instantiated apache, dovecot and so on
-  - hooking a script into various stages of shutdown/rearly booot
+  - hooking a script into various stages of shutdown/early boot
 
 Regularly:
 
@@ -88,7 +88,7 @@ Janitorial Clean-ups:
   string_hash_ops_free everywhere, so that destruction is implicit rather than
   explicit. Similar, for other special hashmap/set/ordered_hashmap destructors.
 
-* generators sometimes apply C escaping and somethines specifier escaping to
+* generators sometimes apply C escaping and sometimes specifier escaping to
   paths and similar strings they write out. Sometimes both. We should clean
   this up, and should probably always apply both, i.e. introduce
   unit_file_escape() or so, which applies both.
@@ -98,7 +98,7 @@ Deprecations and removals:
 * Remove any support for booting without /usr pre-mounted in the initrd entirely.
   Update INITRD_INTERFACE.md accordingly.
 
-* remove cgrouspv1 support EOY 2023. As per
+* remove cgroups v1 support EOY 2023. As per
   https://lists.freedesktop.org/archives/systemd-devel/2022-July/048120.html
   and then rework cgroupsv2 support around fds, i.e. keep one fd per active
   unit around, and always operate on that, instead of cgroup fs paths.
@@ -133,6 +133,61 @@ Deprecations and removals:
 
 Features:
 
+* systemd-pcrextend:
+  - support measuring to nvindex with PCR update semantics ("fake PCRs")
+  - add api for "allocating" such an nvindex
+  - once we have that start measuring every sysext we apply, every confext,
+    every RootImage= we apply, evey nspawn and so on. All in separate fake
+    PCRs.
+
+* vmspawn:
+  - enable hyperv extension by default (https://www.qemu.org/docs/master/system/i386/hyperv.html)
+  - register with machined
+  - run in scope unit when invoked from command line, and machined registration is off
+  - support --directory= via virtiofs
+  - sd_notify support
+  - --ephemeral support
+  - --read-only support
+  - automatically suspend/resume the VM if the host suspends. Use logind
+    suspend inhibitor to implement this. request clean suspend by generating
+    suspend key presses.
+  - support for "real" networking via "-n" and --network-bridge=
+  - automatically run service "at the side" for swtpm
+  - translate SIGTERM to clean ACPI shutdown event
+
+* systemd-pcrmachine should probably also measure the SMBIOS system UUID.
+
+* sd-boot: allow synthesizing additional type1 entries via SMBIOS vendor strings
+
+* storagetm:
+  - add USB mass storage device logic, so that all local disks are also exposed
+    as mass storage devices on systems that have a USB controller that can
+    operate in device mode
+  - add NVMe authentication
+  - show login details also via plymouth
+
+* add support for activating nvme-oF devices at boot automatically via kernel
+  cmdline, and maybe even support a syntax such as
+  root=nvme:<trtype>:<traddr>:<trsvcid>:<nqn>:<partition> to boot directly from
+  nvme-oF
+
+* pcrlock:
+  - make signed PCR work together with pcrlock
+  - add kernel-install plugin that automatically creates UKI .pcrlock file when
+    UKI is installed, and removes it when it is removed again
+  - automatically install PE measurement of sd-boot on "bootctl install"
+  - write generated pcrlock signature files to the ESP as credential, one for
+    each installed OS & pick up generated pcrlock signature file in sd-stub,
+    pass it via initrd to OS
+  - pre-calc sysext + kernel cmdline measurements
+  - pre-calc cryptsetup root key measurement
+  - maybe make systemd-repart generate .pcrlock for old and new GPT header in
+    /run?
+  - Add support for more than 8 branches per PCR OR
+  - add "systemd-pcrlock lock-kernel-current" or so which synthesizes .pcrlock
+    policy from currently booted kernel/event log, to close gap for first boot
+    for pre-built images
+
 * add a new systemd-project@.service that is very similar to user@.service but
   uses DynamicUser=1 and no PAMName= to invoke an unprivileged somewhat
   light-weight service manager. Use HOME=/var/lib/systemd/projects/%i as home
@@ -164,18 +219,18 @@ Features:
 * systemd-repart: add support for formatting dm-crypt + dm-integrity file
   systems.
 
-* homed: add small tool that exposes a homed home dir via nvme-over-tcp (just a
-  bunch of sysfs writes). Then, teach homed/pam_systemd_homed with a user name
-  such as lennart%nvmettcp_192.168.100.77_8787_nqn to log in from any linux
-  host with the same home dir. Similar maybe for nbd, iscsi? this should then
-  first ask for the local root pw, to authenticate that logging in like this is
-  ok, and would then be followed by another password prompt asking for the
-  user's own password. Also, do something similar for CIFS: if you log in via
+* homed: use systemd-storagetm to expose home dirs via nvme-tcp. Then,
+  teach homed/pam_systemd_homed with a user name such as
+  lennart%nvme_tcp_192.168.100.77_8787 to log in from any linux host with the
+  same home dir. Similar maybe for nbd, iscsi? this should then first ask for
+  the local root pw, to authenticate that logging in like this is ok, and would
+  then be followed by another password prompt asking for the user's own
+  password. Also, do something similar for CIFS: if you log in via
   lennart%cifs-someserver_someshare, then set up the homed dir for it
-  automatically. The PAM module should update the user name used for login to the
-  short version once it set up the user. Some care should be taken, so that the
-  long version can be still be resolved via NSS afterwards, to deal with PAM
-  clients that do not support PAM sessions where PAM_USER changes half-way.
+  automatically. The PAM module should update the user name used for login to
+  the short version once it set up the user. Some care should be taken, so that
+  the long version can be still be resolved via NSS afterwards, to deal with
+  PAM clients that do not support PAM sessions where PAM_USER changes half-way.
 
 * redefine /var/lib/extensions/ as the dir one can place all three of sysext,
   confext as well is multi-modal DDIs that qualify as both. Then introduce
@@ -271,7 +326,7 @@ Features:
 * measure some string via pcrphase whenever we end up booting into emergency
   mode.
 
-* homed: add a basic form of of secrets management to homed, that stores
+* homed: add a basic form of secrets management to homed, that stores
   secrets in $HOME somewhere, is protected by the accounts own authentication
   mechanisms. Should implement something PKCS#11-like that can be used to
   implement emulated FIDO2 in unpriv userspace on top (which should happen
@@ -284,54 +339,6 @@ Features:
 
 * systemd-mount should only consider modern file systems when mounting, similar
   to systemd-dissect
-
-* new "systemd-pcrlock" component for dealing with PCR4. Design idea:
-  1. define /{etc,usr,var/lib}/pcrlock.d/<component>/<version>.pcrlock
-  2. these files contain list of hashes that will be measured when component is
-     run, per PCR
-  3. each component involved in the boot that is deterministically measured can
-     place one or more of these files in those dirs (shim, sd-boot,
-     sd-stub/UKI, cryptsetup, pcrphase, pcrfs, …)
-  4. since each component has its own dir, with multiple files in them, package
-     such as kernels (of which there can be multiple installed at the same
-     time) can be grouped together: only one of them is measured at a time.
-  5. whenever a new component is added or an old one removed, or the PCR lock
-     shall be relaxed or tightened the systemd-pcrlock tool is invoked.
-  6. tool iterates through all these files, orders them alphabetically by
-     component, then matches them up with current measurements (as per uefi
-     event log), identifying by hash, accepting that the "beginning" of the
-     measurements might not be recognizable.
-  7. Then calculates expected PCR values starting with the "unrecognized
-     head" from the event log, then continuing with all of components
-     defined via the .pcrlock files (but dropping out the "recognized tail"
-     from the uefi event log). (This might mean combinatorial explosion, if
-     there are multiple shims, multiple sd-boot, and so on.)
-  8. Generates a public/private key pair on the TPM
-  9. Generates a counter object in the TPM, with a policy that allows only
-     one-by-one increase with signature policy by the public/private key pair.
-  10. now signs policies of all expected PCR values with the generated keypair,
-      using all combinations of components defined in the .pcrlock files
-      restricting it to the counter + 1.
-  11. locks down the keypair with a signed policy with its own public key
-  12. generates JSON file of all these policies with their signatures, drops
-      them as singleton in ESP
-  13. increases the counter by one.
-  14. after boot sd-stub picks JSON up from ESP, passes it to userspace via
-      .extra
-  15. JSON contained policies can now be used to unlock disk as well as the
-      public/key itself for signing further policies, as well as increment for
-      the counter
-  16. whenever any of the components above is added/removed new JSON file with
-      signatures for counter + 1 is generated, dropped in ESP, then counter
-      increased. (i.e. this means the "recognized tail" of the event log is
-      deterministically swapped out)
-  17. when firmware update is expected, relaxed signed policy is generated for
-      next boot only valid if counter is increased (this means the
-      "unrecognized head" for the event log can change without losing access)
-  18. on every boot checks if releaxed policy is in effect, if so, new strict
-      policy is generated and counter increased.
-  Net result: Removes downgrade attack surface + Locks OS to firmware + Allows
-              downgrades within bounds
 
 * add another PE section ".fname" or so that encodes the intended filename for
   PE file, and validate that when loading add-ons and similar before using
@@ -432,7 +439,7 @@ Features:
 * .service with invalid Sockets= starts successfully.
 
 * landlock: lock down RuntimeDirectory= via landlock, so that services lose
-  ability to write anywehere else below /run/. Similar for
+  ability to write anywhere else below /run/. Similar for
   StateDirectory=. Benefit would be clear delegation via unit files: services
   get the directories they get, and nothing else even if they wanted to.
 
@@ -455,30 +462,6 @@ Features:
 * SIGRTMIN+18 and memory pressure handling should still be added to: hostnamed,
   localed, oomd, timedated.
 
-* in order to make binding to PCR 4 realistic:
-  - generate one keypair "U" and store it in a tpm2 nvindex.
-  - Generate another keypair "P" and store it in a second tpm2 nvindex.
-  - allocate a persistent counter object "C" in the tpm2
-  - Enroll all user objects (i.e. luks volumes, creds, …) to a tpm2 policy
-    signed by U.
-  - Lock both U and P down with a tpm2 policy signed by P (yes, P can only be
-    used if a signature by P itself can be provided)
-  - For regular reboots generate a signature for a restrictive PCR4 + counter C
-    based policy with key P. Place signature in EFI var, so it can be found on
-    next boot
-  - For reboots where a firmware update is expected generate a signature with a
-    more open policy against just counter C. Place signature in same EFI var.
-  - Increase C whenever switching between these two signature types.
-  - During early boot, use the signature from the EFI var to unlock U and P.
-    Use it to generate a signature for unlocking user objects given the current
-    PCR 4 value, store that away into /run somewhere, for user during the whole
-    later boot.
-  - When booting up automatically update the mentioned efi var so that it
-    contains the restrictive signature. But also generate a signature ahead of
-    time that could be used in case during the current boot we later detect we might
-    need to reboot for a firmware update. Store that in /run somewhere, so that
-    it can be placed in the EFI var, if needed.
-
 * repart/gpt-auto/DDIs: maybe introduce a concept of "extension" partitions,
   that have a new type uuid and can "extend" earlier partitions, to work around
   the fact that systemd-repart can only grow the last partition defined. During
@@ -493,16 +476,12 @@ Features:
   grow exponentially in size to ensure O(log(n)) time for finding them on
   access.
 
-* split out execute.c into new "systemd-executor" binary. Then make PID 1 fork
-  that off via vfork(), and then let that executor do the hard work. Ultimately
-  the executor then gets replaced by the real binary sooner or later. Reason:
-  currently the intermediary "stub" process is a CoW trap that doubles memory
-  usage of PID 1 on each service start. Also, strictly speaking we are not
-  allowed to do NSS from the stub process yet we do anyway. Next steps would
-  then be maybe use CLONE_INTO_CGROUP for the executor, given that we don't
-  need glibc anymore in the stub process then. Then, switch nspawn to just be a
-  frontend for this too, so that we have to ways into the executor: via unit
-  files/dbus/varlin through PID1 and via cmdline/OCI through nspawn.
+* Use CLONE_INTO_CGROUP to spawn systemd-executor, once glibc supports it in
+  posix_spawn().
+
+* Make nspawn to a frontend for systemd-executor, so that we have to ways into
+  the executor: via unit files/dbus/varlink through PID1 and via cmdline/OCI
+  through nspawn.
 
 * sd-stub: detect if we are running with uefi console output on serial, and if so
   automatically add console= to kernel cmdline matching the same port.
@@ -862,15 +841,6 @@ Features:
 * sd-device: maybe pin the sysfs dir with an fd, during the entire runtime of
   an sd_device, then always work based on that.
 
-* add small wrapper around qemu that implements sd_notify/AF_VSOCK + machined and
-  maybe some other stuff and boots it. Should implement command line roughly
-  equivalent to nspawn's. Maybe be called "systemd-vmspawn". Should imply good
-  settings, i.e. RNG + HyperV enlightenments. Should also result in swtpm
-  instance, plus virtiofsd instances. Translate credentials into smbios type
-  11 strings. Correctly translate SIGTERM into ACPI shutdown events.
-  Listen to logind suspend events and turn these into suspend key pressed +
-  ACPI resume events.
-
 * maybe add new flags to gpt partition tables for rootfs and usrfs indicating
   purpose, i.e. whether something is supposed to be bootable in a VM, on
   baremetal, on an nspawn-style container, if it is a portable service image,
@@ -1017,12 +987,6 @@ Features:
   set up the directory so that it can only be accessed if host and app are in
   order.
 
-* TPM2: extend unlock policy to protect against version downgrades in signed
-  policies: policy probably must take some nvram based generation counter into
-  account that can only monotonically increase and can be used to invalidate
-  old PCR signatures. Otherwise people could downgrade to old signed PCR sets
-  whenever they want.
-
 * update HACKING.md to suggest developing systemd with the ideas from:
   https://0pointer.net/blog/testing-my-system-code-in-usr-without-modifying-usr.html
   https://0pointer.net/blog/running-an-container-off-the-host-usr.html
@@ -1128,9 +1092,6 @@ Features:
   options. Particularly useful for portable services, and anything else that
   uses RootDirectory= or RootImage=. (Might also over-mount
   /sys/class/dmi/id/*{uuid,serial} with /dev/null).
-
-* kernel-install:
-  - add --all switch for rerunning kernel-install for all installed kernels
 
 * doc: prep a document explaining resolved's internal objects, i.e. Query
   vs. Question vs. Transaction vs. Stream and so on.
@@ -1281,8 +1242,8 @@ Features:
     defined on the host, plus all images installed into /var/lib/machines/,
     /var/lib/portable/ and so on.
   - figure out what to do about system extensions (i.e. they need to imply an
-    update component, since otherwise system extenion' sysupdate.d/ files would
-    override the host's update files.)
+    update component, since otherwise sysupdate.d/ files would override the
+    host's update files.)
   - Allow invocation with a single transfer definition, i.e. with
     --definitions= pointing to a file rather than a dir.
   - add ability to disable implicit decompression of downloaded artifacts,
@@ -1399,8 +1360,6 @@ Features:
     - libpam (only when called from PID 1)
     - bzip2, xz, lz4 (always — gzip and zstd should probably stay static deps the way they are,
       since they are so basic and our defaults)
-  o move into separate libsystemd-shared-iptables.so .so
-    - iptables-libs (only used by nspawn + networkd)
 
 * seccomp: maybe use seccomp_merge() to merge our filters per-arch if we can.
   Apparently kernel performance is much better with fewer larger seccomp
@@ -2124,7 +2083,7 @@ Features:
     if LimitNPROC= is used without User= we should warn and refuse
     operation.
   - journalctl --verify: don't show files that are currently being
-    written to as FAIL, but instead show that their are being written to.
+    written to as FAIL, but instead show that they are being written to.
   - add journalctl -H that talks via ssh to a remote peer and passes through
     binary logs data
   - add a version of --merge which also merges /var/log/journal/remote
@@ -2291,6 +2250,8 @@ Features:
     avatar/photo or so. This data should be stored along with the user record,
     but probably shouldn't be part of the record itself, since it might be
     large.
+  - add "homectl unbind" command to remove local user record of an inactive
+    home dir
 
 * add a new switch --auto-definitions=yes/no or so to systemd-repart. If
   specified, synthesize a definition automatically if we can: enlarge last
@@ -2550,7 +2511,7 @@ Features:
      them at shutdown; store them in client->ia_na
    - write more test cases
    - implement reconfigure support, see 5.3., 15.11. and 22.20.
-   - implement support for temporary adressess (IA_TA)
+   - implement support for temporary addresses (IA_TA)
    - implement dhcpv6 authentication
    - investigate the usefulness of Confirm messages; i.e. are there any
      situations where the link changes without any loss in carrier detection

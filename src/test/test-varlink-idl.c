@@ -15,6 +15,7 @@
 #include "varlink-io.systemd.Resolve.h"
 #include "varlink-io.systemd.UserDatabase.h"
 #include "varlink-io.systemd.oom.h"
+#include "varlink-io.systemd.service.h"
 #include "varlink-io.systemd.sysext.h"
 #include "varlink-org.varlink.service.h"
 
@@ -138,6 +139,8 @@ TEST(parse_format) {
         print_separator();
         test_parse_format_one(&vl_interface_io_systemd_PCRExtend);
         print_separator();
+        test_parse_format_one(&vl_interface_io_systemd_service);
+        print_separator();
         test_parse_format_one(&vl_interface_io_systemd_sysext);
         print_separator();
         test_parse_format_one(&vl_interface_xyz_test);
@@ -246,6 +249,35 @@ TEST(validate_json) {
         assert_se(varlink_idl_validate_method_call(symbol, v, NULL) >= 0);
 }
 
+static int test_recursive_one(unsigned depth) {
+        _cleanup_(varlink_interface_freep) VarlinkInterface *parsed = NULL;
+        _cleanup_free_ char *pre = NULL, *post = NULL, *text = NULL;
+        static const char header[] =
+                "interface recursive.test\n"
+                "type Foo (\n";
+
+        /* Generate a chain of nested structures, i.e. a: (a: (... (int))...) */
+        pre = strrep("a:(", depth);
+        post = strrep(")", depth);
+        if (!pre || !post)
+                return log_oom();
+
+        text = strjoin(header, pre, "int", post, ")");
+        if (!text)
+                return log_oom();
+
+        return varlink_idl_parse(text, NULL, NULL, &parsed);
+}
+
+TEST(recursive) {
+        assert_se(test_recursive_one(32) >= 0);
+        assert_se(test_recursive_one(64) >= 0);
+
+        /* We should handle this gracefully without a stack overflow */
+        assert_se(test_recursive_one(65) < 0);
+        assert_se(test_recursive_one(20000) < 0 );
+}
+
 static int test_method(Varlink *link, JsonVariant *parameters, VarlinkMethodFlags flags, void *userdata) {
         JsonVariant *foo = json_variant_by_key(parameters, "foo"), *bar = json_variant_by_key(parameters, "bar");
 
@@ -296,7 +328,7 @@ static void* server_thread(void *userdata) {
 }
 
 TEST(validate_method_call) {
-        _cleanup_close_pair_ int fd[2] = PIPE_EBADF;
+        _cleanup_close_pair_ int fd[2] = EBADF_PAIR;
         _cleanup_(varlink_unrefp) Varlink *v = NULL;
         pthread_t t;
 

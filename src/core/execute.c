@@ -1994,8 +1994,8 @@ static int exec_shared_runtime_allocate(ExecSharedRuntime **ret, const char *id)
 
         *n = (ExecSharedRuntime) {
                 .id = TAKE_PTR(id_copy),
-                .netns_storage_socket = PIPE_EBADF,
-                .ipcns_storage_socket = PIPE_EBADF,
+                .netns_storage_socket = EBADF_PAIR,
+                .ipcns_storage_socket = EBADF_PAIR,
         };
 
         *ret = n;
@@ -2057,7 +2057,7 @@ static int exec_shared_runtime_make(
                 ExecSharedRuntime **ret) {
 
         _cleanup_(namespace_cleanup_tmpdirp) char *tmp_dir = NULL, *var_tmp_dir = NULL;
-        _cleanup_close_pair_ int netns_storage_socket[2] = PIPE_EBADF, ipcns_storage_socket[2] = PIPE_EBADF;
+        _cleanup_close_pair_ int netns_storage_socket[2] = EBADF_PAIR, ipcns_storage_socket[2] = EBADF_PAIR;
         int r;
 
         assert(m);
@@ -2391,7 +2391,7 @@ int exec_runtime_make(
                 ExecSharedRuntime *shared,
                 DynamicCreds *creds,
                 ExecRuntime **ret) {
-        _cleanup_close_pair_ int ephemeral_storage_socket[2] = PIPE_EBADF;
+        _cleanup_close_pair_ int ephemeral_storage_socket[2] = EBADF_PAIR;
         _cleanup_free_ char *ephemeral = NULL;
         _cleanup_(exec_runtime_freep) ExecRuntime *rt = NULL;
         int r;
@@ -2464,9 +2464,12 @@ void exec_runtime_clear(ExecRuntime *rt) {
         rt->ephemeral_copy = mfree(rt->ephemeral_copy);
 }
 
-void exec_params_clear(ExecParameters *p) {
+void exec_params_shallow_clear(ExecParameters *p) {
         if (!p)
                 return;
+
+        /* This is called on the PID1 side, as many of the struct's FDs are only borrowed, and actually
+         * owned by the manager or other objects, and reused across multiple units. */
 
         p->environment = strv_free(p->environment);
         p->fd_names = strv_free(p->fd_names);
@@ -2481,9 +2484,13 @@ void exec_params_clear(ExecParameters *p) {
         p->confirm_spawn = mfree(p->confirm_spawn);
 }
 
-void exec_params_serialized_done(ExecParameters *p) {
+void exec_params_deep_clear(ExecParameters *p) {
         if (!p)
                 return;
+
+        /* This is called on the sd-executor side, where everything received is owned by the process and has
+         * to be fully cleaned up to make sanitizers and analyzers happy, as opposed as the shallow clean
+         * function above. */
 
         close_many_unset(p->fds, p->n_socket_fds + p->n_storage_fds);
 
@@ -2512,7 +2519,7 @@ void exec_params_serialized_done(ExecParameters *p) {
 
         p->fallback_smack_process_label = mfree(p->fallback_smack_process_label);
 
-        exec_params_clear(p);
+        exec_params_shallow_clear(p);
 }
 
 void exec_directory_done(ExecDirectory *d) {

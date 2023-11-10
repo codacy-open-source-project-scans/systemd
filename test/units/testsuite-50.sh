@@ -397,6 +397,15 @@ mkdir -p /etc/symlink-test/
 cp /etc/service-scoped-test.raw /etc/symlink-test/service-scoped-test-v1.raw
 ln -fs /etc/symlink-test/service-scoped-test-v1.raw /etc/symlink-test/service-scoped-test.raw
 systemd-run -P --property ExtensionImages=/etc/symlink-test/service-scoped-test.raw --property RootImage="${image}.raw" cat /etc/systemd/system/some_file | grep -q -F "MARKER_CONFEXT_123"
+# And again mixing sysext and confext
+systemd-run -P \
+    --property ExtensionImages=/usr/share/symlink-test/app-nodistro.raw \
+    --property ExtensionImages=/etc/symlink-test/service-scoped-test.raw \
+    --property RootImage="${image}.raw" cat /etc/systemd/system/some_file | grep -q -F "MARKER_CONFEXT_123"
+systemd-run -P \
+    --property ExtensionImages=/usr/share/symlink-test/app-nodistro.raw \
+    --property ExtensionImages=/etc/symlink-test/service-scoped-test.raw \
+    --property RootImage="${image}.raw" cat /usr/lib/systemd/system/some_file | grep -q -F "MARKER=1"
 
 cat >/run/systemd/system/testservice-50e.service <<EOF
 [Service]
@@ -641,6 +650,7 @@ systemctl status foo.service 2>&1 | grep -q -F "Warning"
 systemd-sysext merge
 systemd-sysext unmerge
 systemctl status foo.service 2>&1 | grep -v -q -F "Warning"
+rm /var/lib/extensions/app-reload.raw
 
 # Test systemd-repart --make-ddi=:
 if command -v mksquashfs >/dev/null 2>&1; then

@@ -634,7 +634,7 @@ TEST(safe_fork) {
 
         BLOCK_SIGNALS(SIGCHLD);
 
-        r = safe_fork("(test-child)", FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG|FORK_REARRANGE_STDIO|FORK_REOPEN_LOG, &pid);
+        r = safe_fork("(test-child)", FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_REARRANGE_STDIO|FORK_REOPEN_LOG, &pid);
         assert_se(r >= 0);
 
         if (r == 0) {
@@ -701,7 +701,7 @@ TEST(setpriority_closest) {
         int r;
 
         r = safe_fork("(test-setprio)",
-                      FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG|FORK_WAIT|FORK_LOG, NULL);
+                      FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_WAIT|FORK_LOG, NULL);
         assert_se(r >= 0);
 
         if (r == 0) {
@@ -716,9 +716,16 @@ TEST(setpriority_closest) {
                         assert_se(ERRNO_IS_PRIVILEGE(errno));
                         full_test = false;
                 } else {
-                        assert_se(setresgid(GID_NOBODY, GID_NOBODY, GID_NOBODY) >= 0);
-                        assert_se(setresuid(UID_NOBODY, UID_NOBODY, UID_NOBODY) >= 0);
-                        full_test = true;
+                        /* However, if the hard limit was above 30, setrlimit would succeed unprivileged, so
+                         * check if the UID/GID can be changed before enabling the full test. */
+                        if (setresgid(GID_NOBODY, GID_NOBODY, GID_NOBODY) < 0) {
+                                assert_se(ERRNO_IS_PRIVILEGE(errno));
+                                full_test = false;
+                        } else if (setresuid(UID_NOBODY, UID_NOBODY, UID_NOBODY) < 0) {
+                                assert_se(ERRNO_IS_PRIVILEGE(errno));
+                                full_test = false;
+                        } else
+                                full_test = true;
                 }
 
                 errno = 0;
@@ -855,11 +862,11 @@ TEST(get_process_threads) {
         int r;
 
         /* Run this test in a child, so that we can guarantee there's exactly one thread around in the child */
-        r = safe_fork("(nthreads)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_REOPEN_LOG|FORK_WAIT|FORK_LOG, NULL);
+        r = safe_fork("(nthreads)", FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGTERM|FORK_REOPEN_LOG|FORK_WAIT|FORK_LOG, NULL);
         assert_se(r >= 0);
 
         if (r == 0) {
-                _cleanup_close_pair_ int pfd[2] = PIPE_EBADF, ppfd[2] = PIPE_EBADF;
+                _cleanup_close_pair_ int pfd[2] = EBADF_PAIR, ppfd[2] = EBADF_PAIR;
                 pthread_t t, tt;
                 char x;
 

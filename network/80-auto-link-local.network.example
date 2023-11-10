@@ -9,9 +9,12 @@
 #    by systemd-networkd and edit it there.
 # This file should not be edited in place, because it'll be overwritten on upgrades.
 
-# Enable DHCPv4 and DHCPv6 on all ethernet links
+# Enable IPv4LL + IPv6LL (but no DHCP/IPv6RA) for local links
 [Match]
 Type=ether
+Property=ID_NET_AUTO_LINK_LOCAL_ONLY=1
 
 [Network]
-DHCP=yes
+LinkLocalAddressing=yes
+IPv6AcceptRA=no
+MulticastDNS=yes

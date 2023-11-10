@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
 project('systemd', 'c',
-        version : '254',
+        version : '255',
         license : 'LGPLv2+',
         default_options: [
                 'c_std=gnu11',
@@ -13,8 +13,8 @@ project('systemd', 'c',
         meson_version : '>= 0.60.0',
        )
 
-libsystemd_version = '0.37.0'
-libudev_version = '1.7.7'
+libsystemd_version = '0.38.0'
+libudev_version = '1.7.8'
 
 conf = configuration_data()
 conf.set_quoted('PROJECT_URL', 'https://systemd.io/')
@@ -33,6 +33,7 @@ conf.set_quoted('RELATIVE_SOURCE_PATH', relative_source_path)
 
 conf.set10('BUILD_MODE_DEVELOPER', get_option('mode') == 'developer',
            description : 'tailor build to development or release builds')
+
 feature = get_option('log-message-verification')
 if feature.auto()
         have = conf.get('BUILD_MODE_DEVELOPER') == 1
@@ -174,6 +175,7 @@ profiledir = libexecdir / 'portable' / 'profile'
 repartdefinitionsdir = libexecdir / 'repart/definitions'
 ntpservicelistdir = prefixdir / 'lib/systemd/ntp-units.d'
 credstoredir = prefixdir / 'lib/credstore'
+pcrlockdir = prefixdir / 'lib/pcrlock.d'
 
 configfiledir = get_option('configfiledir')
 if configfiledir == ''
@@ -568,6 +570,8 @@ foreach ident : [
         ['memfd_create',      '''#include <sys/mman.h>'''],
         ['gettid',            '''#include <sys/types.h>
                                  #include <unistd.h>'''],
+        ['fchmodat2',         '''#include <stdlib.h>
+                                 #include <fcntl.h>'''],      # no known header declares fchmodat2
         ['pivot_root',        '''#include <stdlib.h>
                                  #include <unistd.h>'''],     # no known header declares pivot_root
         ['ioprio_get',        '''#include <sched.h>'''],      # no known header declares ioprio_get
@@ -1201,6 +1205,7 @@ libxenctrl = dependency('xencontrol',
                         version : '>= 4.9',
                         required : get_option('xenctrl'))
 conf.set10('HAVE_XENCTRL', libxenctrl.found())
+libxenctrl_cflags = libxenctrl.partial_dependency(includes: true, compile_args: true)
 
 feature = get_option('pam')
 libpam = dependency('pam',
@@ -1285,6 +1290,7 @@ conf.set10('HAVE_LIBIDN2', have)
 libiptc = dependency('libiptc',
                      required : get_option('libiptc'))
 conf.set10('HAVE_LIBIPTC', libiptc.found())
+libiptc_cflags = libiptc.partial_dependency(includes: true, compile_args: true)
 
 libqrencode = dependency('libqrencode',
                          version : '>= 3',
@@ -1531,6 +1537,8 @@ have = get_option('sysupdate').require(
         error_message : 'fdisk and openssl required').allowed()
 conf.set10('ENABLE_SYSUPDATE', have)
 
+conf.set10('ENABLE_STORAGETM', get_option('storagetm'))
+
 have = get_option('importd').require(
         conf.get('HAVE_LIBCURL') == 1 and
         conf.get('HAVE_OPENSSL_OR_GCRYPT') == 1 and
@@ -1561,6 +1569,9 @@ if feature.enabled() and not (have_deps[0] and have_deps[1])
 endif
 have = feature.allowed() and (have_deps[0] or have_deps[1])
 conf.set10('ENABLE_REMOTE', have)
+
+feature = get_option('vmspawn').disable_auto_if(conf.get('BUILD_MODE_DEVELOPER') == 0)
+conf.set10('ENABLE_VMSPAWN', feature.allowed())
 
 foreach term : ['analyze',
                 'backlight',
@@ -2169,6 +2180,7 @@ subdir('src/oom')
 subdir('src/partition')
 subdir('src/path')
 subdir('src/pcrextend')
+subdir('src/pcrlock')
 subdir('src/portable')
 subdir('src/pstore')
 subdir('src/quotacheck')
@@ -2194,10 +2206,11 @@ subdir('src/systemctl')
 subdir('src/sysupdate')
 subdir('src/sysusers')
 subdir('src/sysv-generator')
+subdir('src/storagetm')
 subdir('src/timedate')
 subdir('src/timesync')
-subdir('src/tpm2-setup')
 subdir('src/tmpfiles')
+subdir('src/tpm2-setup')
 subdir('src/tty-ask-password-agent')
 subdir('src/update-done')
 subdir('src/update-utmp')
@@ -2206,6 +2219,7 @@ subdir('src/userdb')
 subdir('src/varlinkctl')
 subdir('src/vconsole')
 subdir('src/veritysetup')
+subdir('src/vmspawn')
 subdir('src/volatile-root')
 subdir('src/xdg-autostart-generator')
 
@@ -2791,11 +2805,13 @@ foreach tuple : [
         ['systemd-analyze',        conf.get('ENABLE_ANALYZE') == 1],
         ['sysupdate'],
         ['sysusers'],
+        ['storagetm'],
         ['timedated'],
         ['timesyncd'],
         ['tmpfiles'],
         ['userdb'],
         ['vconsole'],
+        ['vmspawn'],
         ['xdg-autostart'],
 
         # optional features

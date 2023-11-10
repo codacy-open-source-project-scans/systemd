@@ -1191,7 +1191,7 @@ static int ptsname_namespace(int pty, char **ret) {
 
 int openpt_allocate_in_namespace(pid_t pid, int flags, char **ret_slave) {
         _cleanup_close_ int pidnsfd = -EBADF, mntnsfd = -EBADF, usernsfd = -EBADF, rootfd = -EBADF, fd = -EBADF;
-        _cleanup_close_pair_ int pair[2] = PIPE_EBADF;
+        _cleanup_close_pair_ int pair[2] = EBADF_PAIR;
         pid_t child;
         int r;
 
@@ -1204,7 +1204,7 @@ int openpt_allocate_in_namespace(pid_t pid, int flags, char **ret_slave) {
         if (socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) < 0)
                 return -errno;
 
-        r = namespace_fork("(sd-openptns)", "(sd-openpt)", NULL, 0, FORK_RESET_SIGNALS|FORK_DEATHSIG,
+        r = namespace_fork("(sd-openptns)", "(sd-openpt)", NULL, 0, FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGKILL,
                            pidnsfd, mntnsfd, -1, usernsfd, rootfd, &child);
         if (r < 0)
                 return r;
@@ -1244,7 +1244,7 @@ int openpt_allocate_in_namespace(pid_t pid, int flags, char **ret_slave) {
 
 int open_terminal_in_namespace(pid_t pid, const char *name, int mode) {
         _cleanup_close_ int pidnsfd = -EBADF, mntnsfd = -EBADF, usernsfd = -EBADF, rootfd = -EBADF;
-        _cleanup_close_pair_ int pair[2] = PIPE_EBADF;
+        _cleanup_close_pair_ int pair[2] = EBADF_PAIR;
         pid_t child;
         int r;
 
@@ -1255,7 +1255,7 @@ int open_terminal_in_namespace(pid_t pid, const char *name, int mode) {
         if (socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) < 0)
                 return -errno;
 
-        r = namespace_fork("(sd-terminalns)", "(sd-terminal)", NULL, 0, FORK_RESET_SIGNALS|FORK_DEATHSIG,
+        r = namespace_fork("(sd-terminalns)", "(sd-terminal)", NULL, 0, FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGKILL,
                            pidnsfd, mntnsfd, -1, usernsfd, rootfd, &child);
         if (r < 0)
                 return r;

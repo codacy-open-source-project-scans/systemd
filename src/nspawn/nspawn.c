@@ -60,6 +60,7 @@
 #include "log.h"
 #include "loop-util.h"
 #include "loopback-setup.h"
+#include "machine-credential.h"
 #include "macro.h"
 #include "main-func.h"
 #include "missing_sched.h"
@@ -70,7 +71,6 @@
 #include "netlink-util.h"
 #include "nspawn-bind-user.h"
 #include "nspawn-cgroup.h"
-#include "nspawn-creds.h"
 #include "nspawn-def.h"
 #include "nspawn-expose-ports.h"
 #include "nspawn-mount.h"
@@ -229,7 +229,7 @@ static DeviceNode* arg_extra_nodes = NULL;
 static size_t arg_n_extra_nodes = 0;
 static char **arg_sysctl = NULL;
 static ConsoleMode arg_console_mode = _CONSOLE_MODE_INVALID;
-static Credential *arg_credentials = NULL;
+static MachineCredential *arg_credentials = NULL;
 static size_t arg_n_credentials = 0;
 static char **arg_bind_user = NULL;
 static bool arg_suppress_sync = false;
@@ -1567,106 +1567,24 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_pager_flags |= PAGER_DISABLE;
                         break;
 
-                case ARG_SET_CREDENTIAL: {
-                        _cleanup_free_ char *word = NULL, *data = NULL;
-                        const char *p = optarg;
-                        Credential *a;
-                        ssize_t l;
-
-                        r = extract_first_word(&p, &word, ":", EXTRACT_DONT_COALESCE_SEPARATORS);
+                case ARG_SET_CREDENTIAL:
+                        r = machine_credential_set(&arg_credentials, &arg_n_credentials, optarg);
                         if (r == -ENOMEM)
                                 return log_oom();
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse --set-credential= parameter: %m");
-                        if (r == 0 || !p)
-                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Missing value for --set-credential=: %s", optarg);
-
-                        if (!credential_name_valid(word))
-                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Credential name is not valid: %s", word);
-
-                        for (size_t i = 0; i < arg_n_credentials; i++)
-                                if (streq(arg_credentials[i].id, word))
-                                        return log_error_errno(SYNTHETIC_ERRNO(EEXIST), "Duplicate credential '%s', refusing.", word);
-
-                        l = cunescape(p, UNESCAPE_ACCEPT_NUL, &data);
-                        if (l < 0)
-                                return log_error_errno(l, "Failed to unescape credential data: %s", p);
-
-                        a = reallocarray(arg_credentials, arg_n_credentials + 1, sizeof(Credential));
-                        if (!a)
-                                return log_oom();
-
-                        a[arg_n_credentials++] = (Credential) {
-                                .id = TAKE_PTR(word),
-                                .data = TAKE_PTR(data),
-                                .size = l,
-                        };
-
-                        arg_credentials = a;
-
+                                return log_error_errno(r, "Failed to set credential from %s: %m", optarg);
                         arg_settings_mask |= SETTING_CREDENTIALS;
                         break;
-                }
 
-                case ARG_LOAD_CREDENTIAL: {
-                        ReadFullFileFlags flags = READ_FULL_FILE_SECURE;
-                        _cleanup_(erase_and_freep) char *data = NULL;
-                        _cleanup_free_ char *word = NULL, *j = NULL;
-                        const char *p = optarg;
-                        Credential *a;
-                        size_t size, i;
-
-                        r = extract_first_word(&p, &word, ":", EXTRACT_DONT_COALESCE_SEPARATORS);
+                case ARG_LOAD_CREDENTIAL:
+                        r = machine_credential_load(&arg_credentials, &arg_n_credentials, optarg);
                         if (r == -ENOMEM)
                                 return log_oom();
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse --load-credential= parameter: %m");
-                        if (r == 0 || !p)
-                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Missing value for --load-credential=: %s", optarg);
-
-                        if (!credential_name_valid(word))
-                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Credential name is not valid: %s", word);
-
-                        for (i = 0; i < arg_n_credentials; i++)
-                                if (streq(arg_credentials[i].id, word))
-                                        return log_error_errno(SYNTHETIC_ERRNO(EEXIST), "Duplicate credential '%s', refusing.", word);
-
-                        if (path_is_absolute(p))
-                                flags |= READ_FULL_FILE_CONNECT_SOCKET;
-                        else {
-                                const char *e;
-
-                                r = get_credentials_dir(&e);
-                                if (r < 0)
-                                        return log_error_errno(r, "Credential not available (no credentials passed at all): %s", word);
-
-                                j = path_join(e, p);
-                                if (!j)
-                                        return log_oom();
-                        }
-
-                        r = read_full_file_full(AT_FDCWD, j ?: p, UINT64_MAX, SIZE_MAX,
-                                                flags,
-                                                NULL,
-                                                &data, &size);
-                        if (r < 0)
-                                return log_error_errno(r, "Failed to read credential '%s': %m", j ?: p);
-
-                        a = reallocarray(arg_credentials, arg_n_credentials + 1, sizeof(Credential));
-                        if (!a)
-                                return log_oom();
-
-                        a[arg_n_credentials++] = (Credential) {
-                                .id = TAKE_PTR(word),
-                                .data = TAKE_PTR(data),
-                                .size = size,
-                        };
-
-                        arg_credentials = a;
+                                return log_error_errno(r, "Failed to load credential from %s: %m", optarg);
 
                         arg_settings_mask |= SETTING_CREDENTIALS;
                         break;
-                }
 
                 case ARG_BIND_USER:
                         if (!valid_user_group_name(optarg, 0))
@@ -3516,9 +3434,7 @@ static int inner_child(
         if (!env_use)
                 return log_oom();
 
-        /* Let the parent know that we are ready and
-         * wait until the parent is ready with the
-         * setup, too... */
+        /* Let the parent know that we are ready and wait until the parent is ready with the setup, too... */
         if (!barrier_place_and_sync(barrier)) /* #5 */
                 return log_error_errno(SYNTHETIC_ERRNO(ESRCH), "Parent died too early");
 
@@ -3828,8 +3744,23 @@ static int outer_child(
         if (arg_userns_mode != USER_NAMESPACE_NO &&
             IN_SET(arg_userns_ownership, USER_NAMESPACE_OWNERSHIP_MAP, USER_NAMESPACE_OWNERSHIP_AUTO) &&
             arg_uid_shift != 0) {
+                _cleanup_free_ char *usr_subtree = NULL;
+                char *dirs[3];
+                size_t i = 0;
 
-                r = remount_idmap(directory, arg_uid_shift, arg_uid_range, UID_INVALID, REMOUNT_IDMAPPING_HOST_ROOT);
+                dirs[i++] = (char*) directory;
+
+                if (dissected_image && dissected_image->partitions[PARTITION_USR].found) {
+                        usr_subtree = path_join(directory, "/usr");
+                        if (!usr_subtree)
+                                return log_oom();
+
+                        dirs[i++] = usr_subtree;
+                }
+
+                dirs[i] = NULL;
+
+                r = remount_idmap(dirs, arg_uid_shift, arg_uid_range, UID_INVALID, REMOUNT_IDMAPPING_HOST_ROOT);
                 if (r == -EINVAL || ERRNO_IS_NEG_NOT_SUPPORTED(r)) {
                         /* This might fail because the kernel or file system doesn't support idmapping. We
                          * can't really distinguish this nicely, nor do we have any guarantees about the
@@ -4762,8 +4693,8 @@ static int run_container(
         _cleanup_(release_lock_file) LockFile uid_shift_lock = LOCK_FILE_INIT;
         _cleanup_close_ int etc_passwd_lock = -EBADF;
         _cleanup_close_pair_ int
-                fd_inner_socket_pair[2] = PIPE_EBADF,
-                fd_outer_socket_pair[2] = PIPE_EBADF;
+                fd_inner_socket_pair[2] = EBADF_PAIR,
+                fd_outer_socket_pair[2] = EBADF_PAIR;
 
         _cleanup_close_ int notify_socket = -EBADF, mntns_fd = -EBADF, fd_kmsg_fifo = -EBADF;
         _cleanup_(barrier_destroy) Barrier barrier = BARRIER_NULL;
@@ -5136,6 +5067,11 @@ static int run_container(
         if (r < 0)
                 return r;
 
+        /* Wait that the child is completely ready now, and has mounted their own copies of procfs and so on,
+         * before we take the fully visible instances away. */
+        if (!barrier_sync(&barrier)) /* #5.1 */
+                return log_error_errno(SYNTHETIC_ERRNO(ESRCH), "Child died too early.");
+
         if (arg_userns_mode != USER_NAMESPACE_NO) {
                 r = wipe_fully_visible_fs(mntns_fd);
                 if (r < 0)
@@ -5143,8 +5079,9 @@ static int run_container(
                 mntns_fd = safe_close(mntns_fd);
         }
 
-        /* Let the child know that we are ready and wait that the child is completely ready now. */
-        if (!barrier_place_and_sync(&barrier)) /* #5 */
+        /* And now let the child know that we completed removing the procfs instances, and it can start the
+         * payload. */
+        if (!barrier_place(&barrier)) /* #5.2 */
                 return log_error_errno(SYNTHETIC_ERRNO(ESRCH), "Child died too early.");
 
         /* At this point we have made use of the UID we picked, and thus nss-systemd/systemd-machined.service
@@ -5257,7 +5194,7 @@ static int run_container(
         if (arg_private_network) {
                 /* Move network interfaces back to the parent network namespace. We use `safe_fork`
                  * to avoid having to move the parent to the child network namespace. */
-                r = safe_fork(NULL, FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_WAIT|FORK_LOG, NULL);
+                r = safe_fork(NULL, FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGTERM|FORK_WAIT|FORK_LOG, NULL);
                 if (r < 0)
                         return r;
 
@@ -5637,17 +5574,29 @@ static int run(int argc, char *argv[]) {
                 if (arg_start_mode == START_BOOT) {
                         _cleanup_free_ char *b = NULL;
                         const char *p;
+                        int check_os_release, is_os_tree;
 
                         if (arg_pivot_root_new) {
                                 b = path_join(arg_directory, arg_pivot_root_new);
-                                if (!b)
-                                        return log_oom();
+                                if (!b) {
+                                        r = log_oom();
+                                        goto finish;
+                                }
 
                                 p = b;
                         } else
                                 p = arg_directory;
 
-                        if (path_is_os_tree(p) <= 0) {
+                        check_os_release = getenv_bool("SYSTEMD_NSPAWN_CHECK_OS_RELEASE");
+                        if (check_os_release < 0 && check_os_release != -ENXIO) {
+                                r = log_error_errno(check_os_release, "Failed to parse $SYSTEMD_NSPAWN_CHECK_OS_RELEASE: %m");
+                                goto finish;
+                        }
+
+                        is_os_tree = path_is_os_tree(p);
+                        if (is_os_tree == 0 && check_os_release == 0)
+                                log_debug("Directory %s is missing an os-release file, continuing anyway.", p);
+                        else if (is_os_tree <= 0) {
                                 r = log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                                     "Directory %s doesn't look like an OS root directory (os-release file is missing). Refusing.", p);
                                 goto finish;
@@ -5659,8 +5608,10 @@ static int run(int argc, char *argv[]) {
                                 p = path_join(arg_directory, arg_pivot_root_new, "/usr/");
                         else
                                 p = path_join(arg_directory, "/usr/");
-                        if (!p)
-                                return log_oom();
+                        if (!p) {
+                                r = log_oom();
+                                goto finish;
+                        }
 
                         if (laccess(p, F_OK) < 0) {
                                 r = log_error_errno(SYNTHETIC_ERRNO(EINVAL),
@@ -5910,7 +5861,7 @@ finish:
         expose_port_free_all(arg_expose_ports);
         rlimit_free_all(arg_rlimit);
         device_node_array_free(arg_extra_nodes, arg_n_extra_nodes);
-        credential_free_all(arg_credentials, arg_n_credentials);
+        machine_credential_free_all(arg_credentials, arg_n_credentials);
 
         if (r < 0)
                 return r;

@@ -1718,7 +1718,7 @@ static int run_fsck(int node_fd, const char *fstype) {
                         "(fsck)",
                         NULL,
                         &node_fd, 1, /* Leave the node fd open */
-                        FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_RLIMIT_NOFILE_SAFE|FORK_DEATHSIG|FORK_REARRANGE_STDIO|FORK_CLOEXEC_OFF,
+                        FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_RLIMIT_NOFILE_SAFE|FORK_DEATHSIG_SIGTERM|FORK_REARRANGE_STDIO|FORK_CLOEXEC_OFF,
                         &pid);
         if (r < 0)
                 return log_debug_errno(r, "Failed to fork off fsck: %m");
@@ -2026,7 +2026,7 @@ static int mount_partition(
                                 (void) fs_grow(node, -EBADF, p);
 
                         if (userns_fd >= 0) {
-                                r = remount_idmap_fd(p, userns_fd);
+                                r = remount_idmap_fd(STRV_MAKE(p), userns_fd);
                                 if (r < 0)
                                         return r;
                         }
@@ -2703,7 +2703,6 @@ static int verity_partition(
                 DecryptedImage *d) {
 
         _cleanup_(sym_crypt_freep) struct crypt_device *cd = NULL;
-        _cleanup_(dm_deferred_remove_cleanp) char *restore_deferred_remove = NULL;
         _cleanup_free_ char *node = NULL, *name = NULL;
         _cleanup_close_ int mount_node_fd = -EBADF;
         int r;
@@ -2766,6 +2765,7 @@ static int verity_partition(
          * In case of ENODEV/ENOENT, which can happen if another process is activating at the exact same time,
          * retry a few times before giving up. */
         for (unsigned i = 0; i < N_DEVICE_NODE_LIST_ATTEMPTS; i++) {
+                _cleanup_(dm_deferred_remove_cleanp) char *restore_deferred_remove = NULL;
                 _cleanup_(sym_crypt_freep) struct crypt_device *existing_cd = NULL;
                 _cleanup_close_ int fd = -EBADF;
 
@@ -2795,21 +2795,19 @@ static int verity_partition(
                         return log_debug_errno(r, "Failed to activate verity device %s: %m", node);
 
         check:
-                if (!restore_deferred_remove) {
-                        /* To avoid races, disable automatic removal on umount while setting up the new device. Restore it on failure. */
-                        r = dm_deferred_remove_cancel(name);
-                        /* -EBUSY and -ENXIO: the device has already been removed or being removed. We cannot
-                         * use the device, try to open again. See target_message() in drivers/md/dm-ioctl.c
-                         * and dm_cancel_deferred_remove() in drivers/md/dm.c */
-                        if (IN_SET(r, -EBUSY, -ENXIO))
-                                goto try_again;
-                        if (r < 0)
-                                return log_debug_errno(r, "Failed to disable automated deferred removal for verity device %s: %m", node);
+                /* To avoid races, disable automatic removal on umount while setting up the new device. Restore it on failure. */
+                r = dm_deferred_remove_cancel(name);
+                /* -EBUSY and -ENXIO: the device has already been removed or being removed. We cannot
+                 * use the device, try to open again. See target_message() in drivers/md/dm-ioctl.c
+                 * and dm_cancel_deferred_remove() in drivers/md/dm.c */
+                if (IN_SET(r, -EBUSY, -ENXIO))
+                        goto try_again;
+                if (r < 0)
+                        return log_debug_errno(r, "Failed to disable automated deferred removal for verity device %s: %m", node);
 
-                        restore_deferred_remove = strdup(name);
-                        if (!restore_deferred_remove)
-                                return log_oom_debug();
-                }
+                restore_deferred_remove = strdup(name);
+                if (!restore_deferred_remove)
+                        return log_oom_debug();
 
                 r = verity_can_reuse(verity, name, &existing_cd);
                 /* Same as above, -EINVAL can randomly happen when it actually means -EEXIST */
@@ -2847,6 +2845,9 @@ static int verity_partition(
                         }
                 }
 
+                /* Everything looks good and we'll be able to mount the device, so deferred remove will be re-enabled at that point. */
+                restore_deferred_remove = mfree(restore_deferred_remove);
+
                 mount_node_fd = TAKE_FD(fd);
                 if (existing_cd)
                         crypt_free_and_replace(cd, existing_cd);
@@ -2874,9 +2875,6 @@ static int verity_partition(
         return log_debug_errno(SYNTHETIC_ERRNO(EBUSY), "All attempts to activate verity device %s failed.", name);
 
 success:
-        /* Everything looks good and we'll be able to mount the device, so deferred remove will be re-enabled at that point. */
-        restore_deferred_remove = mfree(restore_deferred_remove);
-
         d->decrypted[d->n_decrypted++] = (DecryptedPartition) {
                 .name = TAKE_PTR(name),
                 .device = TAKE_PTR(cd),
@@ -3377,7 +3375,7 @@ int dissected_image_acquire_metadata(DissectedImage *m, DissectImageFlags extra_
         };
 
         _cleanup_strv_free_ char **machine_info = NULL, **os_release = NULL, **initrd_release = NULL, **sysext_release = NULL, **confext_release = NULL;
-        _cleanup_close_pair_ int error_pipe[2] = PIPE_EBADF;
+        _cleanup_close_pair_ int error_pipe[2] = EBADF_PAIR;
         _cleanup_(rmdir_and_freep) char *t = NULL;
         _cleanup_(sigkill_waitp) pid_t child = 0;
         sd_id128_t machine_id = SD_ID128_NULL;
@@ -3412,7 +3410,7 @@ int dissected_image_acquire_metadata(DissectedImage *m, DissectImageFlags extra_
                 goto finish;
         }
 
-        r = safe_fork("(sd-dissect)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE, &child);
+        r = safe_fork("(sd-dissect)", FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGTERM|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE, &child);
         if (r < 0)
                 goto finish;
         if (r == 0) {

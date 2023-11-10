@@ -38,6 +38,7 @@ radvd_pid_file = '/run/networkd-ci/test-radvd.pid'
 
 systemd_lib_paths = ['/usr/lib/systemd', '/lib/systemd']
 which_paths = ':'.join(systemd_lib_paths + os.getenv('PATH', os.defpath).lstrip(':').split(':'))
+systemd_source_dir = None
 
 networkd_bin = shutil.which('systemd-networkd', path=which_paths)
 resolved_bin = shutil.which('systemd-resolved', path=which_paths)
@@ -48,6 +49,7 @@ networkctl_bin = shutil.which('networkctl', path=which_paths)
 resolvectl_bin = shutil.which('resolvectl', path=which_paths)
 timedatectl_bin = shutil.which('timedatectl', path=which_paths)
 udevadm_bin = shutil.which('udevadm', path=which_paths)
+systemd_udev_rules_build_dir = None
 
 use_valgrind = False
 valgrind_cmd = ''
@@ -336,6 +338,20 @@ def remove_networkd_conf_dropin(*dropins):
 
 def clear_networkd_conf_dropins():
     rm_rf(networkd_conf_dropin_dir)
+
+def setup_systemd_udev_rules():
+    if not systemd_udev_rules_build_dir:
+        return
+
+    mkdir_p(udev_rules_dir)
+
+    for path in [systemd_udev_rules_build_dir, os.path.join(systemd_source_dir, "rules.d")]:
+        print(f"Copying udev rules from {path} to {udev_rules_dir}")
+
+        for rule in os.listdir(path):
+            if not rule.endswith(".rules"):
+                continue
+            cp(os.path.join(path, rule), udev_rules_dir)
 
 def copy_udev_rule(*rules):
     """Copy udev rules"""
@@ -760,6 +776,7 @@ def setUpModule():
     clear_networkd_conf_dropins()
     clear_udev_rules()
 
+    setup_systemd_udev_rules()
     copy_udev_rule('00-debug-net.rules')
 
     # Save current state
@@ -3032,7 +3049,8 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         if not manage_foreign_routes:
             copy_networkd_conf_dropin('networkd-manage-foreign-routes-no.conf')
 
-        copy_network_unit('25-route-static.network', '12-dummy.netdev')
+        copy_network_unit('25-route-static.network', '12-dummy.netdev',
+                          '25-route-static-test1.network', '11-dummy.netdev')
         start_networkd()
         self.wait_online(['dummy98:routable'])
 
@@ -3112,6 +3130,8 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         output = check_output('ip route show 192.168.10.1')
         print(output)
         self.assertIn('192.168.10.1 proto static', output)
+        self.assertIn('nexthop via 149.10.123.59 dev test1 weight 20', output)
+        self.assertIn('nexthop via 149.10.123.60 dev test1 weight 30', output)
         self.assertIn('nexthop via 149.10.124.59 dev dummy98 weight 10', output)
         self.assertIn('nexthop via 149.10.124.60 dev dummy98 weight 5', output)
 
@@ -3121,6 +3141,8 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         # old ip command does not show IPv6 gateways...
         self.assertIn('192.168.10.2 proto static', output)
         self.assertIn('nexthop', output)
+        self.assertIn('dev test1 weight 20', output)
+        self.assertIn('dev test1 weight 30', output)
         self.assertIn('dev dummy98 weight 10', output)
         self.assertIn('dev dummy98 weight 5', output)
 
@@ -3129,6 +3151,8 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         print(output)
         # old ip command does not show 'nexthop' keyword and weight...
         self.assertIn('2001:1234:5:7fff:ff:ff:ff:ff', output)
+        self.assertIn('via 2001:1234:5:6fff:ff:ff:ff:ff dev test1', output)
+        self.assertIn('via 2001:1234:5:7fff:ff:ff:ff:ff dev test1', output)
         self.assertIn('via 2001:1234:5:8fff:ff:ff:ff:ff dev dummy98', output)
         self.assertIn('via 2001:1234:5:9fff:ff:ff:ff:ff dev dummy98', output)
 
@@ -5153,6 +5177,10 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertNotIn('DHCPREQUEST(veth-peer)', output)
         self.assertNotIn('DHCPREPLY(veth-peer)', output)
 
+        # Check json format
+        output = check_output(*networkctl_cmd, '--json=short', 'status', 'veth99', env=env)
+        check_json(output)
+
         # solicit mode
         stop_dnsmasq()
         start_dnsmasq('--dhcp-option=108,00:00:02:00',
@@ -5204,6 +5232,11 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertIn('DHCPREPLY(veth-peer)', output)
         self.assertIn('sent size:  0 option: 14 rapid-commit', output)
 
+        # Check json format
+        output = check_output(*networkctl_cmd, '--json=short', 'status', 'veth99', env=env)
+        check_json(output)
+
+        # Testing without rapid commit support
         with open(os.path.join(network_unit_dir, '25-dhcp-client-ipv6-only.network'), mode='a', encoding='utf-8') as f:
             f.write('\n[DHCPv6]\nRapidCommit=no\n')
 
@@ -5252,6 +5285,10 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertIn('DHCPREQUEST(veth-peer)', output)
         self.assertIn('DHCPREPLY(veth-peer)', output)
         self.assertNotIn('rapid-commit', output)
+
+        # Check json format
+        output = check_output(*networkctl_cmd, '--json=short', 'status', 'veth99', env=env)
+        check_json(output)
 
     def test_dhcp_client_ipv6_dbus_status(self):
         copy_network_unit('25-veth.netdev', '25-dhcp-server-veth-peer.network', '25-dhcp-client-ipv6-only.network')
@@ -5552,6 +5589,26 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         state = get_dhcp4_client_state('veth99')
         print(f"State = {state}")
         self.assertEqual(state, 'bound')
+
+    @unittest.skipUnless("--dhcp-rapid-commit" in run("dnsmasq --help").stdout, reason="dnsmasq is missing dhcp-rapid-commit support")
+    def test_dhcp_client_rapid_commit(self):
+        copy_network_unit('25-veth.netdev', '25-dhcp-server-veth-peer.network', '25-dhcp-client.network')
+        start_networkd()
+        self.wait_online(['veth-peer:carrier'])
+
+        start_dnsmasq('--dhcp-rapid-commit')
+        self.wait_online(['veth99:routable', 'veth-peer:routable'])
+        self.wait_address('veth99', r'inet 192.168.5.[0-9]*/24', ipv='-4')
+
+        state = get_dhcp4_client_state('veth99')
+        print(f"DHCPv4 client state = {state}")
+        self.assertEqual(state, 'bound')
+
+        output = read_dnsmasq_log_file()
+        self.assertIn('DHCPDISCOVER(veth-peer)', output)
+        self.assertNotIn('DHCPOFFER(veth-peer)', output)
+        self.assertNotIn('DHCPREQUEST(veth-peer)', output)
+        self.assertIn('DHCPACK(veth-peer)', output)
 
     def test_dhcp_client_ipv6_only_mode_without_ipv6_connectivity(self):
         copy_network_unit('25-veth.netdev',
@@ -6672,6 +6729,7 @@ class NetworkdMTUTests(unittest.TestCase, Utilities):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--build-dir', help='Path to build dir', dest='build_dir')
+    parser.add_argument('--source-dir', help='Path to source dir/git tree', dest='source_dir')
     parser.add_argument('--networkd', help='Path to systemd-networkd', dest='networkd_bin')
     parser.add_argument('--resolved', help='Path to systemd-resolved', dest='resolved_bin')
     parser.add_argument('--timesyncd', help='Path to systemd-timesyncd', dest='timesyncd_bin')
@@ -6702,6 +6760,7 @@ if __name__ == '__main__':
         resolvectl_bin = os.path.join(ns.build_dir, 'resolvectl')
         timedatectl_bin = os.path.join(ns.build_dir, 'timedatectl')
         udevadm_bin = os.path.join(ns.build_dir, 'udevadm')
+        systemd_udev_rules_build_dir = os.path.join(ns.build_dir, 'rules.d')
     else:
         if ns.networkd_bin:
             networkd_bin = ns.networkd_bin
@@ -6721,6 +6780,13 @@ if __name__ == '__main__':
             timedatectl_bin = ns.timedatectl_bin
         if ns.udevadm_bin:
             udevadm_bin = ns.udevadm_bin
+
+    if ns.source_dir:
+        systemd_source_dir = ns.source_dir
+    else:
+        systemd_source_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../"))
+    if not os.path.exists(os.path.join(systemd_source_dir, "meson_options.txt")):
+        raise RuntimeError(f"{systemd_source_dir} doesn't appear to be a systemd source tree")
 
     use_valgrind = ns.use_valgrind
     enable_debug = ns.enable_debug

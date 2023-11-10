@@ -571,6 +571,7 @@ run_qemu() {
     if ! get_bool "$INTERACTIVE_DEBUG" && ! get_bool "$TEST_SKIP_SHUTDOWN"; then
         kernel_params+=(
             "panic=1"
+            "softlockup_panic=1"
             "systemd.wants=end.service"
         )
     fi
@@ -592,12 +593,6 @@ run_qemu() {
         qemu_options+=("${user_qemu_options[@]}")
     fi
     qemu_options+=(${QEMU_OPTIONS_ARRAY:+"${QEMU_OPTIONS_ARRAY[@]}"})
-
-    if [[ -n "${KERNEL_APPEND:=}" ]]; then
-        local user_kernel_append
-        readarray user_kernel_append <<< "$KERNEL_APPEND"
-        kernel_params+=("${user_kernel_append[@]}")
-    fi
 
     if [[ -n "$INITRD" ]]; then
         if [[ -n "$INITRD_EXTRA" ]]; then
@@ -633,7 +628,7 @@ run_qemu() {
         qemu_cmd=(timeout --foreground "$QEMU_TIMEOUT" "$QEMU_BIN")
     fi
 
-    (set -x; "${qemu_cmd[@]}" "${qemu_options[@]}" -append "${kernel_params[*]}" |& tee "${TESTDIR:?}/console.log")
+    (set -x; "${qemu_cmd[@]}" "${qemu_options[@]}" -append "${kernel_params[*]} ${KERNEL_APPEND:-}" |& tee "${TESTDIR:?}/console.log")
     rc=$?
     if [ "$rc" -eq 124 ] && [ "$QEMU_TIMEOUT" != "infinity" ]; then
         derror "Test timed out after ${QEMU_TIMEOUT}s"
@@ -678,12 +673,6 @@ run_nspawn() {
         nspawn_options+=("${user_nspawn_arguments[@]}")
     fi
 
-    if [[ -n "${KERNEL_APPEND:=}" ]]; then
-        local user_kernel_append
-        readarray user_kernel_append <<< "$KERNEL_APPEND"
-        kernel_params+=("${user_kernel_append[@]}")
-    fi
-
     if [[ "$UNIFIED_CGROUP_HIERARCHY" = "hybrid" ]]; then
         dwarn "nspawn doesn't support SYSTEMD_NSPAWN_UNIFIED_HIERARCHY=hybrid, skipping"
         exit
@@ -702,7 +691,9 @@ run_nspawn() {
         nspawn_cmd+=("$SYSTEMD_NSPAWN")
     fi
 
-    (set -x; "${nspawn_cmd[@]}" "${nspawn_options[@]}" "${kernel_params[@]}" |& tee "${TESTDIR:?}/console.log")
+    # Word splitting here is intentional
+    # shellcheck disable=SC2086
+    (set -x; "${nspawn_cmd[@]}" "${nspawn_options[@]}" "${kernel_params[@]}" ${KERNEL_APPEND:-} |& tee "${TESTDIR:?}/console.log")
     rc=$?
     if [ "$rc" -eq 124 ] && [ "$NSPAWN_TIMEOUT" != "infinity" ]; then
         derror "Test timed out after ${NSPAWN_TIMEOUT}s"
@@ -813,6 +804,15 @@ EOF
         chmod +x "$initdir/opt/script0.sh"
         echo MARKER=1 >"$initdir/usr/lib/systemd/system/some_file"
         mksquashfs "$initdir" "$oldinitdir/usr/share/app0.raw" -noappend
+
+        export initdir="$TESTDIR/conf0"
+        mkdir -p "$initdir/etc/extension-release.d" "$initdir/etc/systemd/system" "$initdir/opt"
+        grep "^ID=" "$os_release" >"$initdir/etc/extension-release.d/extension-release.conf0"
+        echo "${version_id}" >>"$initdir/etc/extension-release.d/extension-release.conf0"
+        ( echo "${version_id}"
+          echo "CONFEXT_IMAGE_ID=app" ) >>"$initdir/etc/extension-release.d/extension-release.conf0"
+        echo MARKER_1 >"$initdir/etc/systemd/system/some_file"
+        mksquashfs "$initdir" "$oldinitdir/usr/share/conf0.raw" -noappend
 
         export initdir="$TESTDIR/app1"
         mkdir -p "$initdir/usr/lib/extension-release.d" "$initdir/usr/lib/systemd/system" "$initdir/opt"

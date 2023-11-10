@@ -59,13 +59,15 @@ static int method_something_more(Varlink *link, JsonVariant *parameters, Varlink
         };
 
         static const JsonDispatch dispatch_table[] = {
-                { "a",  JSON_VARIANT_INTEGER, json_dispatch_int, offsetof(struct Something, x),  JSON_MANDATORY },
+                { "a", JSON_VARIANT_INTEGER, json_dispatch_int, offsetof(struct Something, x), JSON_MANDATORY },
                 { "b", JSON_VARIANT_INTEGER, json_dispatch_int, offsetof(struct Something, y), JSON_MANDATORY},
                 {}
         };
         struct Something s = {};
 
-        r = json_dispatch(parameters, dispatch_table, NULL, 0, &s);
+        r = varlink_dispatch(link, parameters, dispatch_table, &s);
+        if (r != 0)
+                return r;
 
         for (int i = 0; i < 5; i++) {
                 _cleanup_(json_variant_unrefp) JsonVariant *w = NULL;
@@ -324,7 +326,7 @@ int main(int argc, char *argv[]) {
         _cleanup_(rm_rf_physical_and_freep) char *tmpdir = NULL;
         _cleanup_(json_variant_unrefp) JsonVariant *v = NULL;
         _cleanup_(sd_event_unrefp) sd_event *e = NULL;
-        _cleanup_close_pair_ int block_fds[2] = PIPE_EBADF;
+        _cleanup_close_pair_ int block_fds[2] = EBADF_PAIR;
         pthread_t t;
         const char *sp;
 

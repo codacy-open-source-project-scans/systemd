@@ -273,6 +273,7 @@ void cgroup_context_init(CGroupContext *c);
 void cgroup_context_done(CGroupContext *c);
 void cgroup_context_dump(Unit *u, FILE* f, const char *prefix);
 void cgroup_context_dump_socket_bind_item(const CGroupSocketBindItem *item, FILE *f);
+void cgroup_context_dump_socket_bind_items(const CGroupSocketBindItem *items, FILE *f);
 
 void cgroup_context_free_device_allow(CGroupContext *c, CGroupDeviceAllow *a);
 void cgroup_context_free_io_device_weight(CGroupContext *c, CGroupIODeviceWeight *w);
@@ -352,6 +353,7 @@ int unit_watch_all_pids(Unit *u);
 int unit_synthesize_cgroup_empty_event(Unit *u);
 
 int unit_get_memory_current(Unit *u, uint64_t *ret);
+int unit_get_memory_peak(Unit *u, uint64_t *ret);
 int unit_get_memory_available(Unit *u, uint64_t *ret);
 int unit_get_tasks_current(Unit *u, uint64_t *ret);
 int unit_get_cpu_usage(Unit *u, nsec_t *ret);

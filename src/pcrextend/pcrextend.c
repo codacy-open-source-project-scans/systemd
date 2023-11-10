@@ -270,9 +270,9 @@ static int json_dispatch_binary_data(const char *name, JsonVariant *variant, Jso
 static int vl_method_extend(Varlink *link, JsonVariant *parameters, VarlinkMethodFlags flags, void *userdata) {
 
         static const JsonDispatch dispatch_table[] = {
-                { "pcr",  JSON_VARIANT_UNSIGNED, json_dispatch_uint,         offsetof(MethodExtendParameters, pcr),  JSON_MANDATORY },
-                { "text", JSON_VARIANT_STRING,   json_dispatch_const_string, offsetof(MethodExtendParameters, text), 0              },
-                { "data", JSON_VARIANT_STRING,   json_dispatch_binary_data,  0,                                      0              },
+                { "pcr",  _JSON_VARIANT_TYPE_INVALID, json_dispatch_uint,         offsetof(MethodExtendParameters, pcr),  JSON_MANDATORY },
+                { "text", JSON_VARIANT_STRING,        json_dispatch_const_string, offsetof(MethodExtendParameters, text), 0              },
+                { "data", JSON_VARIANT_STRING,        json_dispatch_binary_data,  0,                                      0              },
                 {}
         };
         MethodExtendParameters p = {
@@ -282,8 +282,8 @@ static int vl_method_extend(Varlink *link, JsonVariant *parameters, VarlinkMetho
 
         assert(link);
 
-        r = json_dispatch(parameters, dispatch_table, NULL, 0, &p);
-        if (r < 0)
+        r = varlink_dispatch(link, parameters, dispatch_table, &p);
+        if (r != 0)
                 return r;
 
         if (!TPM2_PCR_INDEX_VALID(p.pcr))
