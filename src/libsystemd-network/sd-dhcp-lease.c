@@ -39,7 +39,7 @@ void dhcp_lease_set_timestamp(sd_dhcp_lease *lease, const triple_timestamp *time
         if (timestamp && triple_timestamp_is_set(timestamp))
                 lease->timestamp = *timestamp;
         else
-                triple_timestamp_get(&lease->timestamp);
+                triple_timestamp_now(&lease->timestamp);
 }
 
 int sd_dhcp_lease_get_timestamp(sd_dhcp_lease *lease, clockid_t clock, uint64_t *ret) {
@@ -931,7 +931,10 @@ int dhcp_lease_parse_search_domains(const uint8_t *option, size_t len, char ***d
         int r;
 
         assert(domains);
-        assert_return(option && len > 0, -ENODATA);
+        assert(option || len == 0);
+
+        if (len == 0)
+                return -EBADMSG;
 
         while (pos < len) {
                 _cleanup_free_ char *name = NULL;

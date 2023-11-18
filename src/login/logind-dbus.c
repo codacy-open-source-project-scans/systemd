@@ -405,9 +405,9 @@ static int method_get_session(sd_bus_message *message, void *userdata, sd_bus_er
  * as apps may instead belong to a user service unit.  This includes terminal
  * emulators and hence command-line apps. */
 static int method_get_session_by_pid(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        Manager *m = ASSERT_PTR(userdata);
         _cleanup_free_ char *p = NULL;
         Session *session = NULL;
-        Manager *m = ASSERT_PTR(userdata);
         pid_t pid;
         int r;
 
@@ -426,7 +426,7 @@ static int method_get_session_by_pid(sd_bus_message *message, void *userdata, sd
                 if (r < 0)
                         return r;
         } else {
-                r = manager_get_session_by_pid(m, pid, &session);
+                r = manager_get_session_by_pidref(m, &PIDREF_MAKE_FROM_PID(pid), &session);
                 if (r < 0)
                         return r;
 
@@ -2543,11 +2543,13 @@ static int method_can_shutdown_or_sleep(
         assert(a);
 
         if (a->sleep_operation >= 0) {
-                r = sleep_supported(a->sleep_operation);
+                SleepSupport support;
+
+                r = sleep_supported_full(a->sleep_operation, &support);
                 if (r < 0)
                         return r;
                 if (r == 0)
-                        return sd_bus_reply_method_return(message, "s", "na");
+                        return sd_bus_reply_method_return(message, "s", support == SLEEP_DISABLED ? "no" : "na");
         }
 
         r = sd_bus_query_sender_creds(message, SD_BUS_CREDS_EUID, &creds);
