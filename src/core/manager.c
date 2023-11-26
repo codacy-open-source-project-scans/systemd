@@ -71,6 +71,7 @@
 #include "path-lookup.h"
 #include "path-util.h"
 #include "plymouth-util.h"
+#include "pretty-print.h"
 #include "process-util.h"
 #include "psi-util.h"
 #include "ratelimit.h"
@@ -180,42 +181,6 @@ static void manager_watch_jobs_in_progress(Manager *m) {
                 return;
 
         (void) sd_event_source_set_description(m->jobs_in_progress_event_source, "manager-jobs-in-progress");
-}
-
-#define CYLON_BUFFER_EXTRA (2*STRLEN(ANSI_RED) + STRLEN(ANSI_HIGHLIGHT_RED) + 2*STRLEN(ANSI_NORMAL))
-
-static void draw_cylon(char buffer[], size_t buflen, unsigned width, unsigned pos) {
-        char *p = buffer;
-
-        assert(buflen >= CYLON_BUFFER_EXTRA + width + 1);
-        assert(pos <= width+1); /* 0 or width+1 mean that the center light is behind the corner */
-
-        if (pos > 1) {
-                if (pos > 2)
-                        p = mempset(p, ' ', pos-2);
-                if (log_get_show_color())
-                        p = stpcpy(p, ANSI_RED);
-                *p++ = '*';
-        }
-
-        if (pos > 0 && pos <= width) {
-                if (log_get_show_color())
-                        p = stpcpy(p, ANSI_HIGHLIGHT_RED);
-                *p++ = '*';
-        }
-
-        if (log_get_show_color())
-                p = stpcpy(p, ANSI_NORMAL);
-
-        if (pos < width) {
-                if (log_get_show_color())
-                        p = stpcpy(p, ANSI_RED);
-                *p++ = '*';
-                if (pos < width-1)
-                        p = mempset(p, ' ', width-1-pos);
-                if (log_get_show_color())
-                        strcpy(p, ANSI_NORMAL);
-        }
 }
 
 static void manager_flip_auto_status(Manager *m, bool enable, const char *reason) {
@@ -882,12 +847,12 @@ static int compare_job_priority(const void *a, const void *b) {
         return unit_compare_priority(x->unit, y->unit);
 }
 
-int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, Manager **_m) {
+int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, Manager **ret) {
         _cleanup_(manager_freep) Manager *m = NULL;
         int r;
 
-        assert(_m);
         assert(IN_SET(runtime_scope, RUNTIME_SCOPE_SYSTEM, RUNTIME_SCOPE_USER));
+        assert(ret);
 
         m = new(Manager, 1);
         if (!m)
@@ -927,10 +892,7 @@ int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, 
                 .first_boot = -1,
                 .test_run_flags = test_run_flags,
 
-                .dump_ratelimit = {
-                        .interval = 10 * USEC_PER_MINUTE,
-                        .burst = 10,
-                },
+                .dump_ratelimit = (const RateLimit) { .interval = 10 * USEC_PER_MINUTE, .burst = 10 },
 
                 .executor_fd = -EBADF,
         };
@@ -1068,31 +1030,31 @@ int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, 
                 if (r < 0)
                         return r;
 
-                self_dir_fd = open_parent(self_exe, O_CLOEXEC|O_DIRECTORY, 0);
+                self_dir_fd = open_parent(self_exe, O_CLOEXEC|O_PATH|O_DIRECTORY, 0);
                 if (self_dir_fd < 0)
-                        return -errno;
+                        return self_dir_fd;
 
-                m->executor_fd = openat(self_dir_fd, "systemd-executor", O_CLOEXEC|O_PATH);
-                if (m->executor_fd < 0 && errno == ENOENT)
-                        m->executor_fd = openat(AT_FDCWD, "systemd-executor", O_CLOEXEC|O_PATH);
-                if (m->executor_fd < 0 && errno == ENOENT) {
-                        m->executor_fd = open(SYSTEMD_EXECUTOR_BINARY_PATH, O_CLOEXEC|O_PATH);
+                m->executor_fd = RET_NERRNO(openat(self_dir_fd, "systemd-executor", O_CLOEXEC|O_PATH));
+                if (m->executor_fd == -ENOENT)
+                        m->executor_fd = RET_NERRNO(openat(AT_FDCWD, "systemd-executor", O_CLOEXEC|O_PATH));
+                if (m->executor_fd == -ENOENT) {
+                        m->executor_fd = RET_NERRNO(open(SYSTEMD_EXECUTOR_BINARY_PATH, O_CLOEXEC|O_PATH));
                         level = LOG_WARNING; /* Tests should normally use local builds */
                 }
                 if (m->executor_fd < 0)
-                        return -errno;
+                        return m->executor_fd;
 
                 r = fd_get_path(m->executor_fd, &executor_path);
                 if (r < 0)
                         return r;
 
-                log_full(level, "Using systemd-executor binary from '%s'", executor_path);
+                log_full(level, "Using systemd-executor binary from '%s'.", executor_path);
         }
 
         /* Note that we do not set up the notify fd here. We do that after deserialization,
          * since they might have gotten serialized across the reexec. */
 
-        *_m = TAKE_PTR(m);
+        *ret = TAKE_PTR(m);
 
         return 0;
 }
