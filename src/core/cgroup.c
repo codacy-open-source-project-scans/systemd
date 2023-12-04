@@ -629,11 +629,12 @@ void cgroup_context_dump(Unit *u, FILE* f, const char *prefix) {
                         prefix, FORMAT_TIMESPAN(c->memory_pressure_threshold_usec, 1));
 
         LIST_FOREACH(device_allow, a, c->device_allow)
+                /* strna() below should be redundant, for avoiding -Werror=format-overflow= error. See #30223. */
                 fprintf(f,
                         "%sDeviceAllow: %s %s\n",
                         prefix,
                         a->path,
-                        cgroup_device_permissions_to_string(a->permissions));
+                        strna(cgroup_device_permissions_to_string(a->permissions)));
 
         LIST_FOREACH(device_weights, iw, c->io_device_weights)
                 fprintf(f,
@@ -4064,7 +4065,7 @@ int unit_get_memory_accounting(Unit *u, CGroupMemoryAccountingMetric metric, uin
 
         if (!u->cgroup_path)
                 /* If the cgroup is already gone, we try to find the last cached value. */
-                goto cache;
+                goto finish;
 
         /* The root cgroup doesn't expose this information. */
         if (unit_has_host_root_cgroup(u))
@@ -4084,17 +4085,18 @@ int unit_get_memory_accounting(Unit *u, CGroupMemoryAccountingMetric metric, uin
                 return r;
         updated = r >= 0;
 
-cache:
-        if (metric > _CGROUP_MEMORY_ACCOUNTING_METRIC_CACHED_LAST)
-                return -ENODATA;
+finish:
+        if (metric <= _CGROUP_MEMORY_ACCOUNTING_METRIC_CACHED_LAST) {
+                uint64_t *last = &u->memory_accounting_last[metric];
 
-        uint64_t *last = &u->memory_accounting_last[metric];
+                if (updated)
+                        *last = bytes;
+                else if (*last != UINT64_MAX)
+                        bytes = *last;
+                else
+                        return -ENODATA;
 
-        if (updated)
-                *last = bytes;
-        else if (*last != UINT64_MAX)
-                bytes = *last;
-        else
+        } else if (!updated)
                 return -ENODATA;
 
         if (ret)
