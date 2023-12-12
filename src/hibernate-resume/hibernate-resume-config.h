@@ -27,7 +27,6 @@ typedef struct EFIHibernateLocation {
 typedef struct HibernateInfo {
         const char *device;
         uint64_t offset; /* in memory pages */
-        bool from_efi;
 
         KernelHibernateLocation *cmdline;
         EFIHibernateLocation *efi;
@@ -41,15 +40,9 @@ int acquire_hibernate_info(HibernateInfo *ret);
 
 void compare_hibernate_location_and_warn(const HibernateInfo *info);
 
-void clear_efi_hibernate_location(void);
-
 #else
 
 static inline void compare_hibernate_location_and_warn(const HibernateInfo *info) {
-        return;
-}
-
-static inline void clear_efi_hibernate_location(void) {
         return;
 }
 

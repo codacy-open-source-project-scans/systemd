@@ -204,12 +204,11 @@ void compare_hibernate_location_and_warn(const HibernateInfo *info) {
         int r;
 
         assert(info);
-        assert(info->from_efi || info->cmdline);
 
-        if (info->from_efi)
+        if (!info->cmdline || !info->efi)
                 return;
-        if (!info->efi)
-                return;
+
+        assert(info->device == info->cmdline->device);
 
         if (!path_equal(info->cmdline->device, info->efi->device)) {
                 r = devnode_same(info->cmdline->device, info->efi->device);
@@ -225,17 +224,6 @@ void compare_hibernate_location_and_warn(const HibernateInfo *info) {
         if (info->cmdline->offset != info->efi->offset)
                 log_warning("resume_offset=%" PRIu64 " doesn't match with EFI HibernateLocation offset %" PRIu64 ", proceeding anyway with resume_offset=.",
                             info->cmdline->offset, info->efi->offset);
-}
-
-void clear_efi_hibernate_location(void) {
-        int r;
-
-        if (!is_efi_boot())
-                return;
-
-        r = efi_set_variable(EFI_SYSTEMD_VARIABLE(HibernateLocation), NULL, 0);
-        if (r < 0)
-                log_warning_errno(r, "Failed to clear EFI variable HibernateLocation, ignoring: %m");
 }
 #endif
 
@@ -256,11 +244,9 @@ int acquire_hibernate_info(HibernateInfo *ret) {
         if (i.cmdline) {
                 i.device = i.cmdline->device;
                 i.offset = i.cmdline->offset;
-                i.from_efi = false;
         } else if (i.efi) {
                 i.device = i.efi->device;
                 i.offset = i.efi->offset;
-                i.from_efi = true;
         } else
                 return -ENODEV;
 

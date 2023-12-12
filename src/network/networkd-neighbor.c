@@ -510,10 +510,9 @@ int manager_rtnl_process_neighbor(sd_netlink *rtnl, sd_netlink_message *message,
         if (r < 0) {
                 log_warning_errno(r, "rtnl: received neighbor message with invalid state, ignoring: %m");
                 return 0;
-        } else if (!FLAGS_SET(state, NUD_PERMANENT)) {
-                log_debug("rtnl: received non-static neighbor, ignoring.");
+        } else if (!FLAGS_SET(state, NUD_PERMANENT))
+                /* Currently, we are interested in only static neighbors. */
                 return 0;
-        }
 
         r = sd_rtnl_message_neigh_get_ifindex(message, &ifindex);
         if (r < 0) {
@@ -525,21 +524,24 @@ int manager_rtnl_process_neighbor(sd_netlink *rtnl, sd_netlink_message *message,
         }
 
         r = link_get_by_index(m, ifindex, &link);
-        if (r < 0) {
+        if (r < 0)
                 /* when enumerating we might be out of sync, but we will get the neighbor again. Also,
                  * kernel sends messages about neighbors after a link is removed. So, just ignore it. */
-                log_debug("rtnl: received neighbor for link '%d' we don't know about, ignoring.", ifindex);
                 return 0;
-        }
 
         tmp = new0(Neighbor, 1);
+        if (!tmp)
+                return log_oom();
 
         /* First, retrieve the fundamental information about the neighbor. */
         r = sd_rtnl_message_neigh_get_family(message, &tmp->family);
         if (r < 0) {
                 log_link_warning(link, "rtnl: received neighbor message without family, ignoring.");
                 return 0;
-        } else if (!IN_SET(tmp->family, AF_INET, AF_INET6)) {
+        }
+        if (tmp->family == AF_BRIDGE) /* Currently, we do not support it. */
+                return 0;
+        if (!IN_SET(tmp->family, AF_INET, AF_INET6)) {
                 log_link_debug(link, "rtnl: received neighbor message with invalid family '%i', ignoring.", tmp->family);
                 return 0;
         }
@@ -572,7 +574,7 @@ int manager_rtnl_process_neighbor(sd_netlink *rtnl, sd_netlink_message *message,
         if (!neighbor) {
                 r = neighbor_add(link, tmp);
                 if (r < 0) {
-                        log_link_warning_errno(link, r, "Failed to remember foreign neighbor, ignoring: %m");
+                        log_link_warning_errno(link, r, "Failed to save received neighbor, ignoring: %m");
                         return 0;
                 }
                 neighbor = TAKE_PTR(tmp);

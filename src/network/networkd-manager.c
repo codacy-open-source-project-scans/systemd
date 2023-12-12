@@ -647,7 +647,6 @@ Manager* manager_free(Manager *m) {
          * by the upstream link. And the links may be referenced by netlink slots. Hence, two
          * set_free() must be called after the above sd_netlink_unref(). */
         m->routes = set_free(m->routes);
-        m->routes_foreign = set_free(m->routes_foreign);
 
         m->nexthops = set_free(m->nexthops);
         m->nexthops_by_id = hashmap_free(m->nexthops_by_id);
@@ -750,6 +749,20 @@ static int manager_enumerate_links(Manager *m) {
         assert(m->rtnl);
 
         r = sd_rtnl_message_new_link(m->rtnl, &req, RTM_GETLINK, 0);
+        if (r < 0)
+                return r;
+
+        r = manager_enumerate_internal(m, m->rtnl, req, manager_rtnl_process_link);
+        if (r < 0)
+                return r;
+
+        req = sd_netlink_message_unref(req);
+
+        r = sd_rtnl_message_new_link(m->rtnl, &req, RTM_GETLINK, 0);
+        if (r < 0)
+                return r;
+
+        r = sd_rtnl_message_link_set_family(req, AF_BRIDGE);
         if (r < 0)
                 return r;
 

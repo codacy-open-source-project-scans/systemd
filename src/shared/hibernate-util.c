@@ -446,7 +446,7 @@ int hibernation_is_safe(void) {
                                        "Not running on EFI and resume= is not set. Hibernation is not safe.");
 
         if (bypass_space_check)
-                return true;
+                return 0;
 
         r = get_proc_meminfo_active(&active);
         if (r < 0)
@@ -505,4 +505,15 @@ int write_resume_config(dev_t devno, uint64_t offset, const char *device) {
         log_debug("Wrote resume=%s for device '%s' to /sys/power/resume.", devno_str, device);
 
         return 0;
+}
+
+void clear_efi_hibernate_location_and_warn(void) {
+        int r;
+
+        if (!is_efi_boot())
+                return;
+
+        r = efi_set_variable(EFI_SYSTEMD_VARIABLE(HibernateLocation), NULL, 0);
+        if (r < 0)
+                log_warning_errno(r, "Failed to clear EFI variable HibernateLocation, ignoring: %m");
 }
