@@ -674,8 +674,8 @@ static void address_modify_nft_set_context(Address *address, bool add, NFTSetCon
                 }
 
                 if (r < 0)
-                        log_warning_errno(r, "Failed to %s NFT set: family %s, table %s, set %s, IP address %s, ignoring",
-                                          add? "add" : "delete",
+                        log_warning_errno(r, "Failed to %s NFT set: family %s, table %s, set %s, IP address %s, ignoring: %m",
+                                          add ? "add" : "delete",
                                           nfproto_to_string(nft_set->nfproto), nft_set->table, nft_set->set,
                                           IN_ADDR_PREFIX_TO_STRING(address->family, &address->in_addr, address->prefixlen));
                 else
@@ -2472,7 +2472,7 @@ int address_section_verify(Address *address) {
         if (address->flags != filtered_flags) {
                 _cleanup_free_ char *str = NULL;
 
-                (void) address_flags_to_string_alloc(filtered_flags, address->family, &str);
+                (void) address_flags_to_string_alloc(address->flags ^ filtered_flags, address->family, &str);
                 return log_warning_errno(SYNTHETIC_ERRNO(EINVAL),
                                          "%s: unexpected address flags \"%s\" were configured. "
                                          "Ignoring [Address] section from line %u.",

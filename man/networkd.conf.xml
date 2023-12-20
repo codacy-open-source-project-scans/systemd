@@ -27,9 +27,11 @@
   </refnamediv>
 
   <refsynopsisdiv>
-    <para><filename>/etc/systemd/networkd.conf</filename></para>
-    <para><filename>/etc/systemd/networkd.conf.d/*.conf</filename></para>
-    <para><filename>/usr/lib/systemd/networkd.conf.d/*.conf</filename></para>
+    <para><simplelist>
+      <member><filename>/etc/systemd/networkd.conf</filename></member>
+      <member><filename>/etc/systemd/networkd.conf.d/*.conf</filename></member>
+      <member><filename>/usr/lib/systemd/networkd.conf.d/*.conf</filename></member>
+    </simplelist></para>
   </refsynopsisdiv>
 
   <refsect1>
@@ -88,6 +90,17 @@
         Defaults to yes.</para>
 
         <xi:include href="version-info.xml" xpointer="v246"/></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>ManageForeignNextHops=</varname></term>
+        <listitem><para>A boolean. When true, <command>systemd-networkd</command> will remove nexthops
+        that are not configured in .network files (except for routes with protocol
+        <literal>kernel</literal>). When false, it will
+        not remove any foreign nexthops, keeping them even if they are not configured in a .network file.
+        Defaults to yes.</para>
+
+        <xi:include href="version-info.xml" xpointer="v256"/></listitem>
       </varlistentry>
 
       <varlistentry>
