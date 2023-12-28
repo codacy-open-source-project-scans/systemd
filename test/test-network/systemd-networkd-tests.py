@@ -1087,7 +1087,7 @@ class NetworkctlTests(unittest.TestCase, Utilities):
         self.assertNotIn('dummy98', output)
 
     def test_reconfigure(self):
-        copy_network_unit('25-address-static.network', '12-dummy.netdev')
+        copy_network_unit('25-address-static.network', '12-dummy.netdev', copy_dropins=False)
         start_networkd()
         self.wait_online(['dummy98:routable'])
 
@@ -1121,7 +1121,7 @@ class NetworkctlTests(unittest.TestCase, Utilities):
         self.assertNotIn('inet 10.1.2.4/16 brd 10.1.255.255 scope global secondary dummy98', output)
         self.assertNotIn('inet 10.2.2.4/16 brd 10.2.255.255 scope global dummy98', output)
 
-        copy_network_unit('25-address-static.network')
+        copy_network_unit('25-address-static.network', copy_dropins=False)
         networkctl_reload()
         self.wait_online(['dummy98:routable'])
 
@@ -1154,7 +1154,7 @@ class NetworkctlTests(unittest.TestCase, Utilities):
             check()
 
     def test_up_down(self):
-        copy_network_unit('25-address-static.network', '12-dummy.netdev')
+        copy_network_unit('25-address-static.network', '12-dummy.netdev', copy_dropins=False)
         start_networkd()
         self.wait_online(['dummy98:routable'])
 
@@ -1238,15 +1238,20 @@ class NetworkctlTests(unittest.TestCase, Utilities):
         print(output)
         self.assertRegex(output, 'Type: loopback')
 
-    def test_udev_link_file(self):
-        copy_network_unit('11-dummy.netdev', '11-dummy.network', '25-default.link')
+    def test_unit_file(self):
+        copy_network_unit('11-test-unit-file.netdev', '11-test-unit-file.network', '11-test-unit-file.link')
         start_networkd()
         self.wait_online(['test1:degraded'])
 
         output = check_output(*networkctl_cmd, '-n', '0', 'status', 'test1', env=env)
         print(output)
-        self.assertRegex(output, r'Link File: /run/systemd/network/25-default.link')
-        self.assertRegex(output, r'Network File: /run/systemd/network/11-dummy.network')
+        self.assertIn('Link File: /run/systemd/network/11-test-unit-file.link', output)
+        self.assertIn('/run/systemd/network/11-test-unit-file.link.d/dropin.conf', output)
+        self.assertIn('Network File: /run/systemd/network/11-test-unit-file.network', output)
+        self.assertIn('/run/systemd/network/11-test-unit-file.network.d/dropin.conf', output)
+
+        output = read_networkd_log()
+        self.assertIn('test1: Configuring with /run/systemd/network/11-test-unit-file.network (dropins: /run/systemd/network/11-test-unit-file.network.d/dropin.conf).', output)
 
         # This test may be run on the system that has older udevd than 70f32a260b5ebb68c19ecadf5d69b3844896ba55 (v249).
         # In that case, the udev DB for the loopback network interface may already have ID_NET_LINK_FILE property.
@@ -1254,8 +1259,8 @@ class NetworkctlTests(unittest.TestCase, Utilities):
         check_output(*udevadm_cmd, 'trigger', '--settle', '--action=add', '/sys/class/net/lo')
         output = check_output(*networkctl_cmd, '-n', '0', 'status', 'lo', env=env)
         print(output)
-        self.assertRegex(output, r'Link File: n/a')
-        self.assertRegex(output, r'Network File: n/a')
+        self.assertIn('Link File: n/a', output)
+        self.assertIn('Network File: n/a', output)
 
     def test_delete_links(self):
         copy_network_unit('11-dummy.netdev', '11-dummy.network',
@@ -2751,6 +2756,15 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         for i in range(1, 254):
             self.assertIn(f'inet 10.3.3.{i}/16 brd 10.3.255.255', output)
 
+        # test for an empty string assignment for Address= in [Network]
+        copy_network_unit('25-address-static.network.d/20-clear-addresses.conf')
+        networkctl_reload()
+        self.wait_online(['dummy98:routable'])
+        output = check_output('ip -4 address show dev dummy98')
+        for i in range(1, 254):
+            self.assertNotIn(f'inet 10.3.3.{i}/16 brd 10.3.255.255', output)
+        self.assertIn('inet 10.4.0.1/16 brd 10.4.255.255', output)
+
     def test_address_ipv4acd(self):
         check_output('ip netns add ns99')
         check_output('ip link add veth99 type veth peer veth-peer')
@@ -3181,7 +3195,7 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         output = check_output(*networkctl_cmd, '--json=short', 'status', env=env)
         check_json(output)
 
-        copy_network_unit('25-address-static.network')
+        copy_network_unit('25-address-static.network', copy_dropins=False)
         networkctl_reload()
         self.wait_online(['dummy98:routable'])
 
@@ -3578,6 +3592,7 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         self.check_ipv6_sysctl_attr('dummy98', 'proxy_ndp', '1')
         self.check_ipv4_sysctl_attr('dummy98', 'forwarding', '1')
         self.check_ipv4_sysctl_attr('dummy98', 'proxy_arp', '1')
+        self.check_ipv4_sysctl_attr('dummy98', 'proxy_arp_pvlan', '1')
         self.check_ipv4_sysctl_attr('dummy98', 'accept_local', '1')
         self.check_ipv4_sysctl_attr('dummy98', 'rp_filter', '0')
 

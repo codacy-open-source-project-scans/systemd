@@ -201,17 +201,13 @@ Address *address_free(Address *address) {
         if (address->network) {
                 assert(address->section);
                 ordered_hashmap_remove(address->network->addresses_by_section, address->section);
+
+                if (address->network->dhcp_server_address == address)
+                        address->network->dhcp_server_address = NULL;
         }
 
-        if (address->link) {
+        if (address->link)
                 set_remove(address->link->addresses, address);
-
-                if (address->family == AF_INET6 &&
-                    in6_addr_equal(&address->in_addr.in6, &address->link->ipv6ll_address))
-                        memzero(&address->link->ipv6ll_address, sizeof(struct in6_addr));
-
-                ipv4acd_detach(address->link, address);
-        }
 
         config_section_free(address->section);
         free(address->label);
@@ -400,25 +396,25 @@ static int address_ipv4_prefix(const Address *a, struct in_addr *ret) {
 static void address_hash_func(const Address *a, struct siphash *state) {
         assert(a);
 
-        siphash24_compress(&a->family, sizeof(a->family), state);
+        siphash24_compress_typesafe(a->family, state);
 
         switch (a->family) {
         case AF_INET: {
                 struct in_addr prefix;
 
-                siphash24_compress(&a->prefixlen, sizeof(a->prefixlen), state);
+                siphash24_compress_typesafe(a->prefixlen, state);
 
                 assert_se(address_ipv4_prefix(a, &prefix) >= 0);
-                siphash24_compress(&prefix, sizeof(prefix), state);
+                siphash24_compress_typesafe(prefix, state);
 
-                siphash24_compress(&a->in_addr.in, sizeof(a->in_addr.in), state);
+                siphash24_compress_typesafe(a->in_addr.in, state);
                 break;
         }
         case AF_INET6:
-                siphash24_compress(&a->in_addr.in6, sizeof(a->in_addr.in6), state);
+                siphash24_compress_typesafe(a->in_addr.in6, state);
 
                 if (in6_addr_is_null(&a->in_addr.in6))
-                        siphash24_compress(&a->prefixlen, sizeof(a->prefixlen), state);
+                        siphash24_compress_typesafe(a->prefixlen, state);
                 break;
 
         default:
@@ -778,6 +774,13 @@ static int address_drop(Address *address) {
 
         address_del_netlabel(address);
 
+        /* FIXME: if the IPv6LL address is dropped, stop DHCPv6, NDISC, RADV. */
+        if (address->family == AF_INET6 &&
+            in6_addr_equal(&address->in_addr.in6, &link->ipv6ll_address))
+                link->ipv6ll_address = (const struct in6_addr) {};
+
+        ipv4acd_detach(link, address);
+
         address_free(address);
 
         link_update_operstate(link, /* also_update_master = */ true);
@@ -975,7 +978,7 @@ int manager_get_address(Manager *manager, int family, const union in_addr_union 
         return -ENOENT;
 }
 
-bool manager_has_address(Manager *manager, int family, const union in_addr_union *address, bool check_ready) {
+bool manager_has_address(Manager *manager, int family, const union in_addr_union *address) {
         Address *a;
 
         assert(manager);
@@ -985,7 +988,7 @@ bool manager_has_address(Manager *manager, int family, const union in_addr_union
         if (manager_get_address(manager, family, address, 0, &a) < 0)
                 return false;
 
-        return check_ready ? address_is_ready(a) : (address_exists(a) && address_lifetime_is_valid(a));
+        return address_is_ready(a);
 }
 
 const char* format_lifetime(char *buf, size_t l, usec_t lifetime_usec) {
@@ -1994,10 +1997,16 @@ int config_parse_address(
         assert(rvalue);
         assert(data);
 
-        if (streq(section, "Network"))
+        if (streq(section, "Network")) {
+                if (isempty(rvalue)) {
+                        /* If an empty string specified in [Network] section, clear previously assigned addresses. */
+                        network->addresses_by_section = ordered_hashmap_free_with_destructor(network->addresses_by_section, address_free);
+                        return 0;
+                }
+
                 /* we are not in an Address section, so use line number instead. */
                 r = address_new_static(network, filename, line, &n);
-        else
+        } else
                 r = address_new_static(network, filename, section_line, &n);
         if (r == -ENOMEM)
                 return log_oom();

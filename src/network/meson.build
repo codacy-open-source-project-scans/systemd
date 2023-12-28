@@ -56,8 +56,9 @@ sources = files(
         'networkd-link.c',
         'networkd-lldp-rx.c',
         'networkd-lldp-tx.c',
-        'networkd-manager-bus.c',
         'networkd-manager.c',
+        'networkd-manager-bus.c',
+        'networkd-manager-varlink.c',
         'networkd-ndisc.c',
         'networkd-neighbor.c',
         'networkd-netlabel.c',
@@ -109,7 +110,10 @@ systemd_networkd_wait_online_sources = files(
         'wait-online/wait-online.c',
 )
 
-networkctl_sources = files('networkctl.c')
+networkctl_sources = files(
+        'networkctl.c',
+        'networkctl-config-file.c'
+)
 
 network_generator_sources = files(
         'generator/main.c',

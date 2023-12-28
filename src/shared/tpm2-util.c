@@ -2059,7 +2059,7 @@ int tpm2_create_primary(
                         session ? session->esys_handle : ESYS_TR_PASSWORD,
                         ESYS_TR_NONE,
                         ESYS_TR_NONE,
-                        sensitive ? sensitive : &(TPM2B_SENSITIVE_CREATE) {},
+                        sensitive ?: &(TPM2B_SENSITIVE_CREATE) {},
                         template,
                         /* outsideInfo= */ NULL,
                         &(TPML_PCR_SELECTION) {},
@@ -5891,10 +5891,7 @@ int tpm2_unseal_data(
                                        "Failed to unseal data: %s", sym_Tss2_RC_Decode(rc));
 
         _cleanup_(iovec_done) struct iovec d = {};
-        d = (struct iovec) {
-                .iov_base = memdup(unsealed->buffer, unsealed->size),
-                .iov_len = unsealed->size,
-        };
+        d = IOVEC_MAKE(memdup(unsealed->buffer, unsealed->size), unsealed->size);
 
         explicit_bzero_safe(unsealed->buffer, unsealed->size);
 
@@ -5965,7 +5962,7 @@ int tpm2_list_devices(void) {
                 }
         }
 
-        if (table_get_rows(t) <= 1) {
+        if (table_isempty(t)) {
                 log_info("No suitable TPM2 devices found.");
                 return 0;
         }
@@ -7572,7 +7569,7 @@ int tpm2_util_pbkdf2_hmac_sha256(const void *pass,
                     size_t saltlen,
                     uint8_t ret_key[static SHA256_DIGEST_SIZE]) {
 
-        uint8_t _cleanup_(erase_and_freep) *buffer = NULL;
+        _cleanup_(erase_and_freep) uint8_t *buffer = NULL;
         uint8_t u[SHA256_DIGEST_SIZE];
 
         /* To keep this simple, since derived KeyLen (dkLen in docs)

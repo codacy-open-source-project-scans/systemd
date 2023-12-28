@@ -74,6 +74,10 @@ static void dns_transaction_close_connection(
          * and the reply we might still get from the server will be eaten up instead of resulting in an ICMP
          * port unreachable error message. */
 
+        /* Skip the graveyard stuff when we're shutting down, since that requires running event loop */
+        if (!t->scope->manager->event || sd_event_get_state(t->scope->manager->event) == SD_EVENT_FINISHED)
+                use_graveyard = false;
+
         if (use_graveyard && t->dns_udp_fd >= 0 && t->sent && !t->received) {
                 r = manager_add_socket_to_graveyard(t->scope->manager, t->dns_udp_fd);
                 if (r < 0)
@@ -489,7 +493,7 @@ static int dns_transaction_pick_server(DnsTransaction *t) {
         dns_server_unref(t->server);
         t->server = dns_server_ref(server);
 
-        t->n_picked_servers ++;
+        t->n_picked_servers++;
 
         log_debug("Using DNS server %s for transaction %u.", strna(dns_server_string_full(t->server)), t->id);
 
@@ -2808,7 +2812,7 @@ static int dns_transaction_requires_rrsig(DnsTransaction *t, DnsResourceRecord *
                         if (r == 0)
                                 continue;
 
-                        return FLAGS_SET(t->answer_query_flags, SD_RESOLVED_AUTHENTICATED);
+                        return FLAGS_SET(dt->answer_query_flags, SD_RESOLVED_AUTHENTICATED);
                 }
 
                 return true;
@@ -2835,7 +2839,7 @@ static int dns_transaction_requires_rrsig(DnsTransaction *t, DnsResourceRecord *
                         /* We found the transaction that was supposed to find the SOA RR for us. It was
                          * successful, but found no RR for us. This means we are not at a zone cut. In this
                          * case, we require authentication if the SOA lookup was authenticated too. */
-                        return FLAGS_SET(t->answer_query_flags, SD_RESOLVED_AUTHENTICATED);
+                        return FLAGS_SET(dt->answer_query_flags, SD_RESOLVED_AUTHENTICATED);
                 }
 
                 return true;

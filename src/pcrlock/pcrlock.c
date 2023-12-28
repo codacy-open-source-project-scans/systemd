@@ -11,6 +11,7 @@
 #include "blockdev-util.h"
 #include "build.h"
 #include "chase.h"
+#include "color-util.h"
 #include "conf-files.h"
 #include "efi-api.h"
 #include "env-util.h"
@@ -1932,40 +1933,6 @@ static int event_log_map_components(EventLog *el) {
         return event_log_validate_fully_recognized(el);
 }
 
-static void hsv_to_rgb(
-                double h, double s, double v,
-                uint8_t* ret_r, uint8_t *ret_g, uint8_t *ret_b) {
-
-        double c, x, m, r, g, b;
-
-        assert(s >= 0 && s <= 100);
-        assert(v >= 0 && v <= 100);
-        assert(ret_r);
-        assert(ret_g);
-        assert(ret_b);
-
-        c = (s / 100.0) * (v / 100.0);
-        x = c * (1 - fabs(fmod(h / 60.0, 2) - 1));
-        m = (v / 100) - c;
-
-        if (h >= 0 && h < 60)
-                r = c, g = x, b = 0.0;
-        else if (h >= 60 && h < 120)
-                r = x, g = c, b = 0.0;
-        else if (h >= 120 && h < 180)
-                r = 0.0, g = c, b = x;
-        else if (h >= 180 && h < 240)
-                r = 0.0, g = x, b = c;
-        else if (h >= 240 && h < 300)
-                r = x, g = 0.0, b = c;
-        else
-                r = c, g = 0.0, b = x;
-
-        *ret_r = (uint8_t) ((r + m) * 255);
-        *ret_g = (uint8_t) ((g + m) * 255);
-        *ret_b = (uint8_t) ((b + m) * 255);
-}
-
 #define ANSI_TRUE_COLOR_MAX (7U + 3U + 1U + 3U + 1U + 3U + 2U)
 
 static const char *ansi_true_color(uint8_t r, uint8_t g, uint8_t b, char ret[static ANSI_TRUE_COLOR_MAX]) {
@@ -2603,17 +2570,17 @@ static int verb_list_components(int argc, char *argv[], void *userdata) {
                 }
         }
 
-        if (table_get_rows(table) > 1 || !FLAGS_SET(arg_json_format_flags, JSON_FORMAT_OFF)) {
+        if (!table_isempty(table) || !FLAGS_SET(arg_json_format_flags, JSON_FORMAT_OFF)) {
                 r = table_print_with_pager(table, arg_json_format_flags, arg_pager_flags, /* show_header= */ true);
                 if (r < 0)
                         return log_error_errno(r, "Failed to output table: %m");
         }
 
         if (FLAGS_SET(arg_json_format_flags, JSON_FORMAT_OFF)) {
-                if (table_get_rows(table) > 1)
-                        printf("\n%zu components listed.\n", table_get_rows(table) - 1);
-                else
+                if (table_isempty(table))
                         printf("No components defined.\n");
+                else
+                        printf("\n%zu components listed.\n", table_get_rows(table) - 1);
         }
 
         return 0;

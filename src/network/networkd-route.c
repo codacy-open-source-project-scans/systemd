@@ -115,37 +115,37 @@ Route *route_free(Route *route) {
 static void route_hash_func(const Route *route, struct siphash *state) {
         assert(route);
 
-        siphash24_compress(&route->family, sizeof(route->family), state);
+        siphash24_compress_typesafe(route->family, state);
 
         switch (route->family) {
         case AF_INET:
         case AF_INET6:
-                siphash24_compress(&route->dst_prefixlen, sizeof(route->dst_prefixlen), state);
-                siphash24_compress(&route->dst, FAMILY_ADDRESS_SIZE(route->family), state);
+                siphash24_compress_typesafe(route->dst_prefixlen, state);
+                in_addr_hash_func(&route->dst, route->family, state);
 
-                siphash24_compress(&route->src_prefixlen, sizeof(route->src_prefixlen), state);
-                siphash24_compress(&route->src, FAMILY_ADDRESS_SIZE(route->family), state);
+                siphash24_compress_typesafe(route->src_prefixlen, state);
+                in_addr_hash_func(&route->src, route->family, state);
 
-                siphash24_compress(&route->gw_family, sizeof(route->gw_family), state);
+                siphash24_compress_typesafe(route->gw_family, state);
                 if (IN_SET(route->gw_family, AF_INET, AF_INET6)) {
-                        siphash24_compress(&route->gw, FAMILY_ADDRESS_SIZE(route->gw_family), state);
-                        siphash24_compress(&route->gw_weight, sizeof(route->gw_weight), state);
+                        in_addr_hash_func(&route->gw, route->gw_family, state);
+                        siphash24_compress_typesafe(route->gw_weight, state);
                 }
 
-                siphash24_compress(&route->prefsrc, FAMILY_ADDRESS_SIZE(route->family), state);
+                in_addr_hash_func(&route->prefsrc, route->family, state);
 
-                siphash24_compress(&route->tos, sizeof(route->tos), state);
-                siphash24_compress(&route->priority, sizeof(route->priority), state);
-                siphash24_compress(&route->table, sizeof(route->table), state);
-                siphash24_compress(&route->protocol, sizeof(route->protocol), state);
-                siphash24_compress(&route->scope, sizeof(route->scope), state);
-                siphash24_compress(&route->type, sizeof(route->type), state);
+                siphash24_compress_typesafe(route->tos, state);
+                siphash24_compress_typesafe(route->priority, state);
+                siphash24_compress_typesafe(route->table, state);
+                siphash24_compress_typesafe(route->protocol, state);
+                siphash24_compress_typesafe(route->scope, state);
+                siphash24_compress_typesafe(route->type, state);
 
-                siphash24_compress(&route->initcwnd, sizeof(route->initcwnd), state);
-                siphash24_compress(&route->initrwnd, sizeof(route->initrwnd), state);
+                siphash24_compress_typesafe(route->initcwnd, state);
+                siphash24_compress_typesafe(route->initrwnd, state);
 
-                siphash24_compress(&route->advmss, sizeof(route->advmss), state);
-                siphash24_compress(&route->nexthop_id, sizeof(route->nexthop_id), state);
+                siphash24_compress_typesafe(route->advmss, state);
+                siphash24_compress_typesafe(route->nexthop_id, state);
 
                 break;
         default:
@@ -1302,7 +1302,7 @@ static int route_is_ready_to_configure(const Route *route, Link *link) {
         }
 
         if (in_addr_is_set(route->family, &route->prefsrc) > 0) {
-                r = manager_has_address(link->manager, route->family, &route->prefsrc, route->family == AF_INET6);
+                r = manager_has_address(link->manager, route->family, &route->prefsrc);
                 if (r <= 0)
                         return r;
         }
@@ -2869,7 +2869,7 @@ int config_parse_route_tcp_rto(
                 return 0;
         }
 
-        if (IN_SET(usec, 0, USEC_INFINITY) ||
+        if (!timestamp_is_set(usec) ||
             DIV_ROUND_UP(usec, USEC_PER_MSEC) > UINT32_MAX) {
                 log_syntax(unit, LOG_WARNING, filename, line, 0,
                            "Route TCP retransmission timeout (RTO) must be in the range 0…%"PRIu32"ms, ignoring assignment: %s", UINT32_MAX, rvalue);

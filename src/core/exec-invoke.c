@@ -670,12 +670,8 @@ static int chown_terminal(int fd, uid_t uid) {
         assert(fd >= 0);
 
         /* Before we chown/chmod the TTY, let's ensure this is actually a tty */
-        if (isatty(fd) < 1) {
-                if (IN_SET(errno, EINVAL, ENOTTY))
-                        return 0; /* not a tty */
-
-                return -errno;
-        }
+        if (!isatty_safe(fd))
+                return 0;
 
         /* This might fail. What matters are the results. */
         r = fchmod_and_chown(fd, TTY_MODE, uid, GID_INVALID);
@@ -1883,7 +1879,7 @@ static int build_environment(
                                                     "Failed to determine user credentials for root: %m");
         }
 
-        bool set_user_login_env = c->set_login_environment >= 0 ? c->set_login_environment : (c->user || c->dynamic_user);
+        bool set_user_login_env = exec_context_get_set_login_environment(c);
 
         if (username) {
                 x = strjoin("USER=", username);
@@ -3948,6 +3944,8 @@ int exec_invoke(
         assert(params);
         assert(exit_status);
 
+        /* This should be mostly redundant, as the log level is also passed as an argument of the executor,
+         * and is already applied earlier. Just for safety. */
         if (context->log_level_max >= 0)
                 log_set_max_level(context->log_level_max);
 

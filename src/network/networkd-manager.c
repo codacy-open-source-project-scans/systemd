@@ -36,8 +36,9 @@
 #include "networkd-dhcp-server-bus.h"
 #include "networkd-dhcp6.h"
 #include "networkd-link-bus.h"
-#include "networkd-manager-bus.h"
 #include "networkd-manager.h"
+#include "networkd-manager-bus.h"
+#include "networkd-manager-varlink.h"
 #include "networkd-neighbor.h"
 #include "networkd-network-bus.h"
 #include "networkd-nexthop.h"
@@ -429,24 +430,12 @@ static int manager_connect_rtnl(Manager *m, int fd) {
         return manager_setup_rtnl_filter(m);
 }
 
-static int manager_dirty_handler(sd_event_source *s, void *userdata) {
-        Manager *m = ASSERT_PTR(userdata);
-        Link *link;
-        int r;
+static int manager_post_handler(sd_event_source *s, void *userdata) {
+        Manager *manager = ASSERT_PTR(userdata);
 
-        if (m->dirty) {
-                r = manager_save(m);
-                if (r < 0)
-                        log_warning_errno(r, "Failed to update state file %s, ignoring: %m", m->state_file);
-        }
-
-        SET_FOREACH(link, m->dirty_links) {
-                r = link_save_and_clean(link);
-                if (r < 0)
-                        log_link_warning_errno(link, r, "Failed to update link state file %s, ignoring: %m", link->state_file);
-        }
-
-        return 1;
+        (void) manager_process_requests(manager);
+        (void) manager_clean_all(manager);
+        return 0;
 }
 
 static int signal_terminate_callback(sd_event_source *s, const struct signalfd_siginfo *si, void *userdata) {
@@ -522,11 +511,7 @@ int manager_setup(Manager *m) {
         if (r < 0)
                 log_debug_errno(r, "Failed allocate memory pressure event source, ignoring: %m");
 
-        r = sd_event_add_post(m->event, NULL, manager_dirty_handler, m);
-        if (r < 0)
-                return r;
-
-        r = sd_event_add_post(m->event, NULL, manager_process_requests, m);
+        r = sd_event_add_post(m->event, NULL, manager_post_handler, m);
         if (r < 0)
                 return r;
 
@@ -544,6 +529,10 @@ int manager_setup(Manager *m) {
 
         if (m->test_mode)
                 return 0;
+
+        r = manager_connect_varlink(m);
+        if (r < 0)
+                return r;
 
         r = manager_connect_bus(m);
         if (r < 0)
@@ -650,11 +639,14 @@ Manager* manager_free(Manager *m) {
         m->routes = set_free(m->routes);
 
         m->nexthops_by_id = hashmap_free(m->nexthops_by_id);
+        m->nexthop_ids = set_free(m->nexthop_ids);
 
         sd_event_source_unref(m->speed_meter_event_source);
         sd_event_unref(m->event);
 
         sd_device_monitor_unref(m->device_monitor);
+
+        manager_varlink_done(m);
 
         bus_verify_polkit_async_registry_free(m->polkit_registry);
         sd_bus_flush_close_unref(m->bus);
@@ -708,7 +700,15 @@ int manager_load_config(Manager *m) {
         if (r < 0)
                 return r;
 
-        return manager_build_dhcp_pd_subnet_ids(m);
+        r = manager_build_dhcp_pd_subnet_ids(m);
+        if (r < 0)
+                return r;
+
+        r = manager_build_nexthop_ids(m);
+        if (r < 0)
+                return r;
+
+        return 0;
 }
 
 int manager_enumerate_internal(

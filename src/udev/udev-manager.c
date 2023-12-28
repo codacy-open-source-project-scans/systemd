@@ -333,11 +333,9 @@ static int on_event_timeout_warning(sd_event_source *s, uint64_t usec, void *use
 }
 
 static void worker_attach_event(Worker *worker, Event *event) {
-        Manager *manager;
-        sd_event *e;
+        Manager *manager = ASSERT_PTR(ASSERT_PTR(worker)->manager);
+        sd_event *e = ASSERT_PTR(manager->event);
 
-        assert(worker);
-        assert(worker->manager);
         assert(event);
         assert(!event->worker);
         assert(!worker->event);
@@ -346,9 +344,6 @@ static void worker_attach_event(Worker *worker, Event *event) {
         worker->event = event;
         event->state = EVENT_RUNNING;
         event->worker = worker;
-
-        manager = worker->manager;
-        e = manager->event;
 
         (void) sd_event_add_time_relative(e, &event->timeout_warning_event, CLOCK_MONOTONIC,
                                           udev_warn_timeout(manager->timeout_usec), USEC_PER_SEC,
@@ -1194,11 +1189,31 @@ Manager* manager_new(void) {
                 .worker_watch = EBADF_PAIR,
                 .log_level = LOG_INFO,
                 .resolve_name_timing = RESOLVE_NAME_EARLY,
-                .timeout_usec = 180 * USEC_PER_SEC,
+                .timeout_usec = DEFAULT_WORKER_TIMEOUT_USEC,
                 .timeout_signal = SIGKILL,
         };
 
         return manager;
+}
+
+void manager_adjust_arguments(Manager *manager) {
+        assert(manager);
+
+        if (manager->timeout_usec < MIN_WORKER_TIMEOUT_USEC) {
+                log_debug("Timeout (%s) for processing event is too small, using the default: %s",
+                          FORMAT_TIMESPAN(manager->timeout_usec, 1),
+                          FORMAT_TIMESPAN(DEFAULT_WORKER_TIMEOUT_USEC, 1));
+
+                manager->timeout_usec = DEFAULT_WORKER_TIMEOUT_USEC;
+        }
+
+        if (manager->exec_delay_usec >= manager->timeout_usec) {
+                log_debug("Delay (%s) for executing RUN= commands is too large compared with the timeout (%s) for event execution, ignoring the delay.",
+                          FORMAT_TIMESPAN(manager->exec_delay_usec, 1),
+                          FORMAT_TIMESPAN(manager->timeout_usec, 1));
+
+                manager->exec_delay_usec = 0;
+        }
 }
 
 int manager_init(Manager *manager, int fd_ctrl, int fd_uevent) {
@@ -1260,22 +1275,22 @@ int manager_main(Manager *manager) {
 
         udev_watch_restore(manager->inotify_fd);
 
-        /* block and listen to all signals on signalfd */
-        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGTERM, SIGINT, SIGHUP, SIGCHLD, SIGRTMIN+18, -1) >= 0);
+        /* block SIGCHLD for listening child events. */
+        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGCHLD, -1) >= 0);
 
         r = sd_event_default(&manager->event);
         if (r < 0)
                 return log_error_errno(r, "Failed to allocate event loop: %m");
 
-        r = sd_event_add_signal(manager->event, NULL, SIGINT, on_sigterm, manager);
+        r = sd_event_add_signal(manager->event, NULL, SIGINT | SD_EVENT_SIGNAL_PROCMASK, on_sigterm, manager);
         if (r < 0)
                 return log_error_errno(r, "Failed to create SIGINT event source: %m");
 
-        r = sd_event_add_signal(manager->event, NULL, SIGTERM, on_sigterm, manager);
+        r = sd_event_add_signal(manager->event, NULL, SIGTERM | SD_EVENT_SIGNAL_PROCMASK, on_sigterm, manager);
         if (r < 0)
                 return log_error_errno(r, "Failed to create SIGTERM event source: %m");
 
-        r = sd_event_add_signal(manager->event, NULL, SIGHUP, on_sighup, manager);
+        r = sd_event_add_signal(manager->event, NULL, SIGHUP | SD_EVENT_SIGNAL_PROCMASK, on_sighup, manager);
         if (r < 0)
                 return log_error_errno(r, "Failed to create SIGHUP event source: %m");
 
@@ -1325,7 +1340,8 @@ int manager_main(Manager *manager) {
                 log_full_errno(ERRNO_IS_NOT_SUPPORTED(r) || ERRNO_IS_PRIVILEGE(r) || (r == -EHOSTDOWN) ? LOG_DEBUG : LOG_WARNING, r,
                                "Failed to allocate memory pressure watch, ignoring: %m");
 
-        r = sd_event_add_signal(manager->event, &manager->memory_pressure_event_source, SIGRTMIN+18, sigrtmin18_handler, NULL);
+        r = sd_event_add_signal(manager->event, &manager->memory_pressure_event_source,
+                                (SIGRTMIN+18) | SD_EVENT_SIGNAL_PROCMASK, sigrtmin18_handler, NULL);
         if (r < 0)
                 return log_error_errno(r, "Failed to allocate SIGRTMIN+18 event source, ignoring: %m");
 
