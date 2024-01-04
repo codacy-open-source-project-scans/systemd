@@ -381,7 +381,7 @@ static int nvme_subsystem_add(const char *node, int consumed_fd, sd_device *devi
                 return log_error_errno(errno, "Failed to fstat '%s': %m", node);
         if (S_ISBLK(st.st_mode)) {
                 if (!device) {
-                        r = sd_device_new_from_devnum(&allocated_device, 'b', st.st_dev);
+                        r = sd_device_new_from_devnum(&allocated_device, 'b', st.st_rdev);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to get device information for device '%s': %m", node);
 
@@ -788,9 +788,10 @@ typedef struct Context {
 static void device_hash_func(const struct stat *q, struct siphash *state) {
         assert(q);
 
+        mode_t m = q->st_mode & S_IFMT;
+        siphash24_compress_typesafe(m, state);
+
         if (S_ISBLK(q->st_mode) || S_ISCHR(q->st_mode)) {
-                mode_t m = q->st_mode & S_IFMT;
-                siphash24_compress_typesafe(m, state);
                 siphash24_compress_typesafe(q->st_rdev, state);
                 return;
         }
@@ -950,9 +951,14 @@ static int device_added(Context *c, sd_device *device) {
                 .st_mode = S_IFBLK,
         };
 
-        r = sd_device_get_devnum(device, &lookup_key.st_rdev);
+        /* MIPS OABI declares st_rdev as unsigned long instead of dev_t.
+         * Use a temp var to avoid passing an incompatible pointer.
+         * https://sourceware.org/bugzilla/show_bug.cgi?id=21278 */
+        dev_t devnum;
+        r = sd_device_get_devnum(device, &devnum);
         if (r < 0)
                 return log_device_error_errno(device, r, "Failed to get major/minor from device: %m");
+        lookup_key.st_rdev = devnum;
 
         if (hashmap_contains(c->subsystems, &lookup_key)) {
                 log_debug("Device '%s' already seen.", devname);
@@ -1006,9 +1012,14 @@ static int device_removed(Context *c, sd_device *device) {
                 .st_mode = S_IFBLK,
         };
 
-        r = sd_device_get_devnum(device, &lookup_key.st_rdev);
+        /* MIPS OABI declares st_rdev as unsigned long instead of dev_t.
+         * Use a temp var to avoid passing an incompatible pointer.
+         * https://sourceware.org/bugzilla/show_bug.cgi?id=21278 */
+        dev_t devnum;
+        r = sd_device_get_devnum(device, &devnum);
         if (r < 0)
                 return log_device_error_errno(device, r, "Failed to get major/minor from device: %m");
+        lookup_key.st_rdev = devnum;
 
         NvmeSubsystem *s = hashmap_remove(c->subsystems, &lookup_key);
         if (!s)

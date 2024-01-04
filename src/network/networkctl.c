@@ -792,14 +792,14 @@ static void acquire_ether_link_info(int *fd, LinkInfo *link) {
 
 static void acquire_wlan_link_info(LinkInfo *link) {
         _cleanup_(sd_netlink_unrefp) sd_netlink *genl = NULL;
-        const char *type = NULL;
         int r, k = 0;
 
         assert(link);
 
-        if (link->sd_device)
-                (void) sd_device_get_devtype(link->sd_device, &type);
-        if (!streq_ptr(type, "wlan"))
+        if (!link->sd_device)
+                return;
+
+        if (!device_is_devtype(link->sd_device, "wlan"))
                 return;
 
         r = sd_genl_socket_open(&genl);
@@ -1458,7 +1458,7 @@ static int dump_dhcp_leases(Table *table, const char *prefix, sd_bus *bus, const
                 if (r < 0)
                         return bus_log_parse_error(r);
 
-                r = sd_dhcp_client_id_to_string(client_id, client_id_sz, &id);
+                r = sd_dhcp_client_id_to_string_from_raw(client_id, client_id_sz, &id);
                 if (r < 0)
                         return bus_log_parse_error(r);
 
@@ -2271,8 +2271,7 @@ static int link_status_one(
         }
 
         if (lease) {
-                const void *client_id;
-                size_t client_id_len;
+                const sd_dhcp_client_id *client_id;
                 const char *tz;
 
                 r = sd_dhcp_lease_get_timezone(lease, &tz);
@@ -2284,11 +2283,11 @@ static int link_status_one(
                                 return table_log_add_error(r);
                 }
 
-                r = sd_dhcp_lease_get_client_id(lease, &client_id, &client_id_len);
+                r = sd_dhcp_lease_get_client_id(lease, &client_id);
                 if (r >= 0) {
                         _cleanup_free_ char *id = NULL;
 
-                        r = sd_dhcp_client_id_to_string(client_id, client_id_len, &id);
+                        r = sd_dhcp_client_id_to_string(client_id, &id);
                         if (r >= 0) {
                                 r = table_add_many(table,
                                                    TABLE_FIELD, "DHCP4 Client ID",

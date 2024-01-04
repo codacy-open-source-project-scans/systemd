@@ -71,7 +71,7 @@ static int dhcp6_remove(Link *link, bool only_marked) {
                 if (only_marked && !address_is_marked(address))
                         continue;
 
-                RET_GATHER(ret, address_remove_and_drop(address));
+                RET_GATHER(ret, address_remove_and_cancel(address, link));
         }
 
         return ret;
@@ -827,7 +827,7 @@ int link_serialize_dhcp6_client(Link *link, FILE *f) {
         if (r >= 0)
                 fprintf(f, "DHCP6_CLIENT_IAID=0x%x\n", iaid);
 
-        r = sd_dhcp6_client_duid_as_string(link->dhcp6_client, &duid);
+        r = sd_dhcp6_client_get_duid_as_string(link->dhcp6_client, &duid);
         if (r >= 0)
                 fprintf(f, "DHCP6_CLIENT_DUID=%s\n", duid);
 
