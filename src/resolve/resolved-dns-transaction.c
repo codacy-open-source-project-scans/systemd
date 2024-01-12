@@ -28,6 +28,8 @@ static void dns_transaction_reset_answer(DnsTransaction *t) {
         t->received = dns_packet_unref(t->received);
         t->answer = dns_answer_unref(t->answer);
         t->answer_rcode = 0;
+        t->answer_ede_rcode = _DNS_EDE_RCODE_INVALID;
+        t->answer_ede_msg = mfree(t->answer_ede_msg);
         t->answer_dnssec_result = _DNSSEC_RESULT_INVALID;
         t->answer_source = _DNS_TRANSACTION_SOURCE_INVALID;
         t->answer_query_flags = 0;
@@ -284,6 +286,7 @@ int dns_transaction_new(
                 .dns_udp_fd = -EBADF,
                 .answer_source = _DNS_TRANSACTION_SOURCE_INVALID,
                 .answer_dnssec_result = _DNSSEC_RESULT_INVALID,
+                .answer_ede_rcode = _DNS_EDE_RCODE_INVALID,
                 .answer_nsec_ttl = UINT32_MAX,
                 .key = dns_resource_key_ref(key),
                 .query_flags = query_flags,
@@ -885,8 +888,21 @@ static int dns_transaction_dnssec_ready(DnsTransaction *t) {
                         /* We handle DNSSEC failures different from other errors, as we care about the DNSSEC
                          * validation result */
 
-                        log_debug("Auxiliary DNSSEC RR query failed validation: %s", dnssec_result_to_string(dt->answer_dnssec_result));
-                        t->answer_dnssec_result = dt->answer_dnssec_result; /* Copy error code over */
+                        log_debug("Auxiliary DNSSEC RR query failed validation: %s%s%s%s%s%s",
+                                  dnssec_result_to_string(dt->answer_dnssec_result),
+                                  dt->answer_ede_rcode >= 0 ? " (" : "",
+                                  dt->answer_ede_rcode >= 0 ? FORMAT_DNS_EDE_RCODE(dt->answer_ede_rcode) : "",
+                                  (dt->answer_ede_rcode >= 0 && !isempty(dt->answer_ede_msg)) ? ": " : "",
+                                  dt->answer_ede_rcode >= 0 ? strempty(dt->answer_ede_msg) : "",
+                                  dt->answer_ede_rcode >= 0 ? ")" : "");
+
+                        /* Copy error code over */
+                        t->answer_dnssec_result = dt->answer_dnssec_result;
+                        t->answer_ede_rcode = dt->answer_ede_rcode;
+                        r = free_and_strdup(&t->answer_ede_msg, dt->answer_ede_msg);
+                        if (r < 0)
+                                log_oom_debug();
+
                         dns_transaction_complete(t, DNS_TRANSACTION_DNSSEC_FAILED);
                         return 0;
 
@@ -1125,91 +1141,6 @@ void dns_transaction_process_reply(DnsTransaction *t, DnsPacket *p, bool encrypt
                 }
         }
 
-        switch (t->scope->protocol) {
-
-        case DNS_PROTOCOL_DNS:
-                assert(t->server);
-
-                if (!t->bypass &&
-                    IN_SET(DNS_PACKET_RCODE(p), DNS_RCODE_FORMERR, DNS_RCODE_SERVFAIL, DNS_RCODE_NOTIMP)) {
-
-                        /* Request failed, immediately try again with reduced features */
-
-                        if (t->current_feature_level <= DNS_SERVER_FEATURE_LEVEL_UDP) {
-
-                                /* This was already at UDP feature level? If so, it doesn't make sense to downgrade
-                                 * this transaction anymore, but let's see if it might make sense to send the request
-                                 * to a different DNS server instead. If not let's process the response, and accept the
-                                 * rcode. Note that we don't retry on TCP, since that's a suitable way to mitigate
-                                 * packet loss, but is not going to give us better rcodes should we actually have
-                                 * managed to get them already at UDP level. */
-
-                                if (dns_transaction_limited_retry(t))
-                                        return;
-
-                                /* Give up, accept the rcode */
-                                log_debug("Server returned error: %s", FORMAT_DNS_RCODE(DNS_PACKET_RCODE(p)));
-                                break;
-                        }
-
-                        /* SERVFAIL can happen for many reasons and may be transient.
-                         * To avoid unnecessary downgrades retry once with the initial level.
-                         * Check for clamp_feature_level_servfail having an invalid value as a sign that this is the
-                         * first attempt to downgrade. If so, clamp to the current value so that the transaction
-                         * is retried without actually downgrading. If the next try also fails we will downgrade by
-                         * hitting the else branch below. */
-                        if (DNS_PACKET_RCODE(p) == DNS_RCODE_SERVFAIL &&
-                            t->clamp_feature_level_servfail < 0) {
-                                t->clamp_feature_level_servfail = t->current_feature_level;
-                                log_debug("Server returned error %s, retrying transaction.",
-                                          FORMAT_DNS_RCODE(DNS_PACKET_RCODE(p)));
-                        } else {
-                                /* Reduce this feature level by one and try again. */
-                                switch (t->current_feature_level) {
-                                case DNS_SERVER_FEATURE_LEVEL_TLS_DO:
-                                        t->clamp_feature_level_servfail = DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN;
-                                        break;
-                                case DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN + 1:
-                                        /* Skip plain TLS when TLS is not supported */
-                                        t->clamp_feature_level_servfail = DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN - 1;
-                                        break;
-                                default:
-                                        t->clamp_feature_level_servfail = t->current_feature_level - 1;
-                                }
-
-                                log_debug("Server returned error %s, retrying transaction with reduced feature level %s.",
-                                          FORMAT_DNS_RCODE(DNS_PACKET_RCODE(p)),
-                                          dns_server_feature_level_to_string(t->clamp_feature_level_servfail));
-                        }
-
-                        dns_transaction_retry(t, false /* use the same server */);
-                        return;
-                }
-
-                if (DNS_PACKET_RCODE(p) == DNS_RCODE_REFUSED) {
-                        /* This server refused our request? If so, try again, use a different server */
-                        log_debug("Server returned REFUSED, switching servers, and retrying.");
-
-                        if (dns_transaction_limited_retry(t))
-                                return;
-
-                        break;
-                }
-
-                if (DNS_PACKET_TC(p))
-                        dns_server_packet_truncated(t->server, t->current_feature_level);
-
-                break;
-
-        case DNS_PROTOCOL_LLMNR:
-        case DNS_PROTOCOL_MDNS:
-                dns_scope_packet_received(t->scope, p->timestamp - t->start_usec);
-                break;
-
-        default:
-                assert_not_reached();
-        }
-
         if (DNS_PACKET_TC(p)) {
 
                 /* Truncated packets for mDNS are not allowed. Give up immediately. */
@@ -1285,6 +1216,136 @@ void dns_transaction_process_reply(DnsTransaction *t, DnsPacket *p, bool encrypt
 
                 dns_transaction_complete(t, DNS_TRANSACTION_INVALID_REPLY);
                 return;
+        }
+
+        switch (t->scope->protocol) {
+
+        case DNS_PROTOCOL_DNS: {
+                assert(t->server);
+
+                (void) dns_packet_ede_rcode(p, &t->answer_ede_rcode, &t->answer_ede_msg);
+
+                if (!t->bypass &&
+                    IN_SET(DNS_PACKET_RCODE(p), DNS_RCODE_FORMERR, DNS_RCODE_SERVFAIL, DNS_RCODE_NOTIMP)) {
+                        /* If the server has replied with detailed error data, using a degraded feature set
+                         * will likely not help anyone. Examine the detailed error to determine the best
+                         * course of action. */
+                        if (t->answer_ede_rcode >= 0 && DNS_PACKET_RCODE(p) == DNS_RCODE_SERVFAIL) {
+                                /* These codes are related to DNSSEC configuration errors. If accurate,
+                                 * this is the domain operator's problem, and retrying won't help. */
+                                if (dns_ede_rcode_is_dnssec(t->answer_ede_rcode)) {
+                                        log_debug("Server returned error: %s (%s%s%s). Lookup failed.",
+                                                  FORMAT_DNS_RCODE(DNS_PACKET_RCODE(p)),
+                                                  FORMAT_DNS_EDE_RCODE(t->answer_ede_rcode),
+                                                  isempty(t->answer_ede_msg) ? "" : ": ",
+                                                  strempty(t->answer_ede_msg));
+
+                                        t->answer_dnssec_result = DNSSEC_UPSTREAM_FAILURE;
+                                        dns_transaction_complete(t, DNS_TRANSACTION_DNSSEC_FAILED);
+                                        return;
+                                }
+
+                                /* These codes probably indicate a transient error. Let's try again. */
+                                if (IN_SET(t->answer_ede_rcode, DNS_EDE_RCODE_NOT_READY, DNS_EDE_RCODE_NET_ERROR)) {
+                                        log_debug("Server returned error: %s (%s%s%s), retrying transaction.",
+                                                  FORMAT_DNS_RCODE(DNS_PACKET_RCODE(p)),
+                                                  FORMAT_DNS_EDE_RCODE(t->answer_ede_rcode),
+                                                  isempty(t->answer_ede_msg) ? "" : ": ",
+                                                  strempty(t->answer_ede_msg));
+                                        dns_transaction_retry(t, false);
+                                        return;
+                                }
+
+                                /* OK, the query failed, but we still shouldn't degrade the feature set for
+                                 * this server. */
+                                log_debug("Server returned error: %s (%s%s%s)",
+                                          FORMAT_DNS_RCODE(DNS_PACKET_RCODE(p)),
+                                          FORMAT_DNS_EDE_RCODE(t->answer_ede_rcode),
+                                          isempty(t->answer_ede_msg) ? "" : ": ",
+                                          strempty(t->answer_ede_msg));
+                                break;
+                        }
+
+                        /* Request failed, immediately try again with reduced features */
+
+                        if (t->current_feature_level <= DNS_SERVER_FEATURE_LEVEL_UDP) {
+
+                                /* This was already at UDP feature level? If so, it doesn't make sense to downgrade
+                                 * this transaction anymore, but let's see if it might make sense to send the request
+                                 * to a different DNS server instead. If not let's process the response, and accept the
+                                 * rcode. Note that we don't retry on TCP, since that's a suitable way to mitigate
+                                 * packet loss, but is not going to give us better rcodes should we actually have
+                                 * managed to get them already at UDP level. */
+
+                                if (dns_transaction_limited_retry(t))
+                                        return;
+
+                                /* Give up, accept the rcode */
+                                log_debug("Server returned error: %s", FORMAT_DNS_RCODE(DNS_PACKET_RCODE(p)));
+                                break;
+                        }
+
+                        /* SERVFAIL can happen for many reasons and may be transient.
+                         * To avoid unnecessary downgrades retry once with the initial level.
+                         * Check for clamp_feature_level_servfail having an invalid value as a sign that this is the
+                         * first attempt to downgrade. If so, clamp to the current value so that the transaction
+                         * is retried without actually downgrading. If the next try also fails we will downgrade by
+                         * hitting the else branch below. */
+                        if (DNS_PACKET_RCODE(p) == DNS_RCODE_SERVFAIL &&
+                            t->clamp_feature_level_servfail < 0) {
+                                t->clamp_feature_level_servfail = t->current_feature_level;
+                                log_debug("Server returned error %s, retrying transaction.",
+                                          FORMAT_DNS_RCODE(DNS_PACKET_RCODE(p)));
+                        } else {
+                                /* Reduce this feature level by one and try again. */
+                                switch (t->current_feature_level) {
+                                case DNS_SERVER_FEATURE_LEVEL_TLS_DO:
+                                        t->clamp_feature_level_servfail = DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN;
+                                        break;
+                                case DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN + 1:
+                                        /* Skip plain TLS when TLS is not supported */
+                                        t->clamp_feature_level_servfail = DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN - 1;
+                                        break;
+                                default:
+                                        t->clamp_feature_level_servfail = t->current_feature_level - 1;
+                                }
+
+                                log_debug("Server returned error %s, retrying transaction with reduced feature level %s.",
+                                          FORMAT_DNS_RCODE(DNS_PACKET_RCODE(p)),
+                                          dns_server_feature_level_to_string(t->clamp_feature_level_servfail));
+                        }
+
+                        dns_transaction_retry(t, false /* use the same server */);
+                        return;
+                }
+
+                if (DNS_PACKET_RCODE(p) == DNS_RCODE_REFUSED) {
+                        /* This server refused our request? If so, try again, use a different server */
+                        if (t->answer_ede_rcode >= 0)
+                                log_debug("Server returned REFUSED (%s), switching servers, and retrying.",
+                                          FORMAT_DNS_EDE_RCODE(t->answer_ede_rcode));
+                        else
+                                log_debug("Server returned REFUSED, switching servers, and retrying.");
+
+                        if (dns_transaction_limited_retry(t))
+                                return;
+
+                        break;
+                }
+
+                if (DNS_PACKET_TC(p))
+                        dns_server_packet_truncated(t->server, t->current_feature_level);
+
+                break;
+        }
+
+        case DNS_PROTOCOL_LLMNR:
+        case DNS_PROTOCOL_MDNS:
+                dns_scope_packet_received(t->scope, p->timestamp - t->start_usec);
+                break;
+
+        default:
+                assert_not_reached();
         }
 
         if (t->server) {
@@ -1760,8 +1821,12 @@ static int dns_transaction_prepare(DnsTransaction *t, usec_t ts) {
                                 t->answer_source = DNS_TRANSACTION_CACHE;
                                 if (t->answer_rcode == DNS_RCODE_SUCCESS)
                                         dns_transaction_complete(t, DNS_TRANSACTION_SUCCESS);
-                                else
+                                else {
+                                        if (t->received)
+                                                (void) dns_packet_ede_rcode(t->received, &t->answer_ede_rcode, &t->answer_ede_msg);
+
                                         dns_transaction_complete(t, DNS_TRANSACTION_RCODE_FAILURE);
+                                }
                                 return 0;
                         }
                 }

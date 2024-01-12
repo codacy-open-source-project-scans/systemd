@@ -14,7 +14,9 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "float.h"
+#include "glyph-util.h"
 #include "hexdecoct.h"
+#include "iovec-util.h"
 #include "json-internal.h"
 #include "json.h"
 #include "macro.h"
@@ -1771,6 +1773,25 @@ static int json_format(FILE *f, JsonVariant *v, JsonFormatFlags flags, const cha
         return 0;
 }
 
+static bool json_variant_is_sensitive_recursive(JsonVariant *v) {
+        if (!v)
+                return false;
+        if (json_variant_is_sensitive(v))
+                return true;
+        if (!json_variant_is_regular(v))
+                return false;
+        if (!IN_SET(v->type, JSON_VARIANT_ARRAY, JSON_VARIANT_OBJECT))
+                return false;
+        if (v->is_reference)
+                return json_variant_is_sensitive_recursive(v->reference);
+
+        for (size_t i = 0; i < json_variant_elements(v); i++)
+                if (json_variant_is_sensitive_recursive(json_variant_by_index(v, i)))
+                        return true;
+
+        return false;
+}
+
 int json_variant_format(JsonVariant *v, JsonFormatFlags flags, char **ret) {
         _cleanup_(memstream_done) MemStream m = {};
         size_t sz;
@@ -1785,6 +1806,10 @@ int json_variant_format(JsonVariant *v, JsonFormatFlags flags, char **ret) {
 
         if (flags & JSON_FORMAT_OFF)
                 return -ENOEXEC;
+
+        if ((flags & JSON_FORMAT_REFUSE_SENSITIVE))
+                if (json_variant_is_sensitive_recursive(v))
+                        return -EPERM;
 
         f = memstream_init(&m);
         if (!f)
@@ -3790,7 +3815,8 @@ int json_buildv(JsonVariant **ret, va_list ap) {
                         break;
                 }
 
-                case _JSON_BUILD_IOVEC_BASE64: {
+                case _JSON_BUILD_IOVEC_BASE64:
+                case _JSON_BUILD_IOVEC_HEX: {
                         const struct iovec *iov;
 
                         if (!IN_SET(current->expect, EXPECT_TOPLEVEL, EXPECT_OBJECT_VALUE, EXPECT_ARRAY_ELEMENT)) {
@@ -3798,10 +3824,14 @@ int json_buildv(JsonVariant **ret, va_list ap) {
                                 goto finish;
                         }
 
-                        iov = ASSERT_PTR(va_arg(ap, const struct iovec*));
+                        iov = va_arg(ap, const struct iovec*);
 
                         if (current->n_suppress == 0) {
-                                r = json_variant_new_base64(&add, iov->iov_base, iov->iov_len);
+                                if (iov)
+                                        r = command == _JSON_BUILD_IOVEC_BASE64 ? json_variant_new_base64(&add, iov->iov_base, iov->iov_len) :
+                                                                                  json_variant_new_hex(&add, iov->iov_base, iov->iov_len);
+                                else
+                                        r = json_variant_new_string(&add, "");
                                 if (r < 0)
                                         goto finish;
                         }
@@ -4592,8 +4622,12 @@ int json_dispatch_full(
                                         done++;
 
                         } else  {
-                                json_log(value, flags, 0, "Unexpected object field '%s'.", json_variant_string(key));
+                                if (flags & JSON_ALLOW_EXTENSIONS) {
+                                        json_log(value, flags, 0, "Unrecognized object field '%s', assuming extension.", json_variant_string(key));
+                                        continue;
+                                }
 
+                                json_log(value, flags, 0, "Unexpected object field '%s'.", json_variant_string(key));
                                 if (flags & JSON_PERMISSIVE)
                                         continue;
 
@@ -4961,6 +4995,63 @@ int json_dispatch_unbase64_iovec(const char *name, JsonVariant *variant, JsonDis
         return 0;
 }
 
+int json_dispatch_byte_array_iovec(const char *name, JsonVariant *variant, JsonDispatchFlags flags, void *userdata) {
+        _cleanup_free_ uint8_t *buffer = NULL;
+        struct iovec *iov = ASSERT_PTR(userdata);
+        size_t sz, k = 0;
+
+        assert(variant);
+
+        if (!json_variant_is_array(variant))
+                return json_log(variant, flags, SYNTHETIC_ERRNO(EINVAL), "JSON field '%s' is not an array.", strna(name));
+
+        sz = json_variant_elements(variant);
+
+        buffer = new(uint8_t, sz + 1);
+        if (!buffer)
+                return json_log(variant, flags, SYNTHETIC_ERRNO(ENOMEM), "Out of memory.");
+
+        JsonVariant *i;
+        JSON_VARIANT_ARRAY_FOREACH(i, variant) {
+                uint64_t b;
+
+                if (!json_variant_is_unsigned(i))
+                        return json_log(variant, flags, SYNTHETIC_ERRNO(EINVAL), "Element %zu of JSON field '%s' is not an unsigned integer.", k, strna(name));
+
+                b = json_variant_unsigned(i);
+                if (b > 0xff)
+                        return json_log(variant, flags, SYNTHETIC_ERRNO(EINVAL),
+                                        "Element %zu of JSON field '%s' is out of range 0%s255.",
+                                        k, strna(name), special_glyph(SPECIAL_GLYPH_ELLIPSIS));
+
+                buffer[k++] = (uint8_t) b;
+        }
+        assert(k == sz);
+
+        /* Append a NUL byte for safety, like we do in memdup_suffix0() and others. */
+        buffer[sz] = 0;
+
+        free_and_replace(iov->iov_base, buffer);
+        iov->iov_len = sz;
+        return 0;
+}
+
+int json_dispatch_in_addr(const char *name, JsonVariant *variant, JsonDispatchFlags flags, void *userdata) {
+        struct in_addr *address = ASSERT_PTR(userdata);
+        _cleanup_(iovec_done) struct iovec iov = {};
+        int r;
+
+        r = json_dispatch_byte_array_iovec(name, variant, flags, &iov);
+        if (r < 0)
+                return r;
+
+        if (iov.iov_len != sizeof(struct in_addr))
+                return json_log(variant, flags, SYNTHETIC_ERRNO(EINVAL), "JSON field '%s' is array of unexpected size.", strna(name));
+
+        memcpy(address, iov.iov_base, iov.iov_len);
+        return 0;
+}
+
 static int json_cmp_strings(const void *x, const void *y) {
         JsonVariant *const *a = x, *const *b = y;
 
@@ -5107,14 +5198,14 @@ int json_variant_unbase64(JsonVariant *v, void **ret, size_t *ret_size) {
         if (!json_variant_is_string(v))
                 return -EINVAL;
 
-        return unbase64mem(json_variant_string(v), SIZE_MAX, ret, ret_size);
+        return unbase64mem(json_variant_string(v), ret, ret_size);
 }
 
 int json_variant_unhex(JsonVariant *v, void **ret, size_t *ret_size) {
         if (!json_variant_is_string(v))
                 return -EINVAL;
 
-        return unhexmem(json_variant_string(v), SIZE_MAX, ret, ret_size);
+        return unhexmem(json_variant_string(v), ret, ret_size);
 }
 
 static const char* const json_variant_type_table[_JSON_VARIANT_TYPE_MAX] = {

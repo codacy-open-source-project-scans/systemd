@@ -1,10 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#if HAVE_BLKID
-#endif
 #include <errno.h>
 #include <getopt.h>
-#include <linux/fs.h>
 #include <linux/loop.h>
 #if HAVE_SELINUX
 #include <selinux/selinux.h>
@@ -12,12 +9,15 @@
 #include <stdlib.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
+#include <sys/mount.h>
 #include <sys/personality.h>
 #include <sys/prctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+
+#include <linux/fs.h> /* Must be included after <sys/mount.h> */
 
 #include "sd-bus.h"
 #include "sd-daemon.h"
@@ -1396,7 +1396,7 @@ static int parse_argv(int argc, char *argv[]) {
                         _cleanup_free_ void *k = NULL;
                         size_t l;
 
-                        r = unhexmem(optarg, strlen(optarg), &k, &l);
+                        r = unhexmem(optarg, &k, &l);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to parse root hash: %s", optarg);
                         if (l < sizeof(sd_id128_t))
@@ -1413,7 +1413,7 @@ static int parse_argv(int argc, char *argv[]) {
                         void *p;
 
                         if ((value = startswith(optarg, "base64:"))) {
-                                r = unbase64mem(value, strlen(value), &p, &l);
+                                r = unbase64mem(value, &p, &l);
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to parse root hash signature '%s': %m", optarg);
 
@@ -2364,6 +2364,18 @@ static int setup_keyring(void) {
         return 0;
 }
 
+int make_run_host(const char *root) {
+        int r;
+
+        assert(root);
+
+        r = userns_mkdir(root, "/run/host", 0755, 0, 0);
+        if (r < 0)
+                return log_error_errno(r, "Failed to create /run/host/: %m");
+
+        return 0;
+}
+
 static int setup_credentials(const char *root) {
         const char *q;
         int r;
@@ -2371,9 +2383,9 @@ static int setup_credentials(const char *root) {
         if (arg_credentials.n_credentials == 0)
                 return 0;
 
-        r = userns_mkdir(root, "/run/host", 0755, 0, 0);
+        r = make_run_host(root);
         if (r < 0)
-                return log_error_errno(r, "Failed to create /run/host: %m");
+                return r;
 
         r = userns_mkdir(root, "/run/host/credentials", 0700, 0, 0);
         if (r < 0)
@@ -2713,9 +2725,9 @@ static int mount_tunnel_dig(const char *root) {
         p = strjoina("/run/systemd/nspawn/propagate/", arg_machine);
         (void) mkdir_p(p, 0600);
 
-        r = userns_mkdir(root, "/run/host", 0755, 0, 0);
+        r = make_run_host(root);
         if (r < 0)
-                return log_error_errno(r, "Failed to create /run/host: %m");
+                return r;
 
         r = userns_mkdir(root, NSPAWN_MOUNT_TUNNEL, 0600, 0, 0);
         if (r < 0)
@@ -3581,9 +3593,11 @@ static int setup_notify_child(void) {
         (void) mkdir_parents(NSPAWN_NOTIFY_SOCKET_PATH, 0755);
         (void) sockaddr_un_unlink(&sa.un);
 
-        r = bind(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
-        if (r < 0)
-                return log_error_errno(errno, "bind(" NSPAWN_NOTIFY_SOCKET_PATH ") failed: %m");
+        WITH_UMASK(0577) { /* only set "w" bit, which is all that's necessary for connecting from the container */
+                r = bind(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+                if (r < 0)
+                        return log_error_errno(errno, "bind(" NSPAWN_NOTIFY_SOCKET_PATH ") failed: %m");
+        }
 
         r = userns_lchown(NSPAWN_NOTIFY_SOCKET_PATH, 0, 0);
         if (r < 0)
@@ -3596,6 +3610,102 @@ static int setup_notify_child(void) {
         return TAKE_FD(fd);
 }
 
+static int setup_unix_export_dir_outside(char **ret) {
+        int r;
+
+        assert(ret);
+
+        _cleanup_free_ char *p = NULL;
+        p = path_join("/run/systemd/nspawn/unix-export", arg_machine);
+        if (!p)
+                return log_oom();
+
+        r = path_is_mount_point(p, /* root= */ NULL, 0);
+        if (r > 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EEXIST), "Mount point '%s' exists already, refusing.", p);
+        if (r < 0 && r != -ENOENT)
+                return log_error_errno(r, "Failed to detect if '%s' is a mount point: %m", p);
+
+        r = mkdir_p(p, 0755);
+        if (r < 0)
+                return log_error_errno(r, "Failed to create '%s': %m", p);
+
+        _cleanup_(rmdir_and_freep) char *q = TAKE_PTR(p);
+
+        /* Mount the "unix export" directory really tiny, just 64 inodes. We mark the superblock writable
+         * (since the container shall bind sockets into it). */
+        r = mount_nofollow_verbose(
+                        LOG_ERR,
+                        "tmpfs",
+                        q,
+                        "tmpfs",
+                        MS_NODEV|MS_NOEXEC|MS_NOSUID|ms_nosymfollow_supported(),
+                        "size=4M,nr_inodes=64,mode=0755");
+        if (r < 0)
+                return r;
+
+        _cleanup_(umount_and_rmdir_and_freep) char *w = TAKE_PTR(q);
+
+        /* After creating the superblock we change the bind mount to be read-only. This means that the fs
+         * itself is writable, but not through the mount accessible from the host. */
+        r = mount_nofollow_verbose(
+                        LOG_ERR,
+                        /* source= */ NULL,
+                        w,
+                        /* fstype= */ NULL,
+                        MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NODEV|MS_NOEXEC|MS_NOSUID|ms_nosymfollow_supported(),
+                        /* options= */ NULL);
+        if (r < 0)
+                return r;
+
+        *ret = TAKE_PTR(w);
+        return 0;
+}
+
+static int setup_unix_export_host_inside(const char *directory, const char *unix_export_path) {
+        int r;
+
+        assert(directory);
+        assert(unix_export_path);
+
+        r = make_run_host(directory);
+        if (r < 0)
+                return r;
+
+        _cleanup_free_ char *p = path_join(directory, "run/host/unix-export");
+        if (!p)
+                return log_oom();
+
+        if (mkdir(p, 0755) < 0)
+                return log_error_errno(errno, "Failed to create '%s': %m", p);
+
+        r = mount_nofollow_verbose(
+                        LOG_ERR,
+                        unix_export_path,
+                        p,
+                        /* fstype= */ NULL,
+                        MS_BIND,
+                        /* options= */ NULL);
+        if (r < 0)
+                return r;
+
+        r = mount_nofollow_verbose(
+                        LOG_ERR,
+                        /* source= */ NULL,
+                        p,
+                        /* fstype= */ NULL,
+                        MS_BIND|MS_REMOUNT|MS_NODEV|MS_NOEXEC|MS_NOSUID|ms_nosymfollow_supported(),
+                        /* options= */ NULL);
+        if (r < 0)
+                return r;
+
+        r = userns_lchown(p, 0, 0);
+        if (r < 0)
+                return log_error_errno(r, "Failed to chown '%s': %m", p);
+
+        return 0;
+}
+
 static int outer_child(
                 Barrier *barrier,
                 const char *directory,
@@ -3603,7 +3713,8 @@ static int outer_child(
                 int fd_outer_socket,
                 int fd_inner_socket,
                 FDSet *fds,
-                int netns_fd) {
+                int netns_fd,
+                const char *unix_export_path) {
 
         _cleanup_(bind_user_context_freep) BindUserContext *bind_user_context = NULL;
         _cleanup_strv_free_ char **os_release_pairs = NULL;
@@ -3897,6 +4008,10 @@ static int outer_child(
         p = prefix_roota(directory, "/run/host");
         (void) make_inaccessible_nodes(p, arg_uid_shift, arg_uid_shift);
 
+        r = setup_unix_export_host_inside(directory, unix_export_path);
+        if (r < 0)
+                return r;
+
         r = setup_pts(directory);
         if (r < 0)
                 return r;
@@ -3946,11 +4061,11 @@ static int outer_child(
 
         /* The same stuff as the $container env var, but nicely readable for the entire payload */
         p = prefix_roota(directory, "/run/host/container-manager");
-        (void) write_string_file(p, arg_container_service_name, WRITE_STRING_FILE_CREATE);
+        (void) write_string_file(p, arg_container_service_name, WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_MODE_0444);
 
         /* The same stuff as the $container_uuid env var */
         p = prefix_roota(directory, "/run/host/container-uuid");
-        (void) write_string_filef(p, WRITE_STRING_FILE_CREATE, SD_ID128_UUID_FORMAT_STR, SD_ID128_FORMAT_VAL(arg_uuid));
+        (void) write_string_filef(p, WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_MODE_0444, SD_ID128_UUID_FORMAT_STR, SD_ID128_FORMAT_VAL(arg_uuid));
 
         if (!arg_use_cgns) {
                 r = mount_cgroups(
@@ -4748,6 +4863,7 @@ static int run_container(
         _cleanup_close_ int notify_socket = -EBADF, mntns_fd = -EBADF, fd_kmsg_fifo = -EBADF;
         _cleanup_(barrier_destroy) Barrier barrier = BARRIER_NULL;
         _cleanup_(sd_event_source_unrefp) sd_event_source *notify_event_source = NULL;
+        _cleanup_(umount_and_rmdir_and_freep) char *unix_export_host_dir = NULL;
         _cleanup_(sd_event_unrefp) sd_event *event = NULL;
         _cleanup_(pty_forward_freep) PTYForward *forward = NULL;
         _cleanup_(sd_netlink_unrefp) sd_netlink *rtnl = NULL;
@@ -4762,6 +4878,11 @@ static int run_container(
 
         assert_se(sigemptyset(&mask_chld) == 0);
         assert_se(sigaddset(&mask_chld, SIGCHLD) == 0);
+
+        /* Set up the unix export host directory on the host first */
+        r = setup_unix_export_dir_outside(&unix_export_host_dir);
+        if (r < 0)
+                return r;
 
         if (arg_userns_mode == USER_NAMESPACE_PICK) {
                 /* When we shall pick the UID/GID range, let's first lock /etc/passwd, so that we can safely
@@ -4833,7 +4954,8 @@ static int run_container(
                                 fd_outer_socket_pair[1],
                                 fd_inner_socket_pair[1],
                                 fds,
-                                child_netns_fd);
+                                child_netns_fd,
+                                unix_export_host_dir);
                 if (r < 0)
                         _exit(EXIT_FAILURE);
 
@@ -5907,6 +6029,10 @@ finish:
 
                 p = strjoina("/run/systemd/nspawn/propagate/", arg_machine);
                 (void) rm_rf(p, REMOVE_ROOT);
+
+                p = strjoina("/run/systemd/nspawn/unix-export/", arg_machine);
+                (void) umount2(p, MNT_DETACH|UMOUNT_NOFOLLOW);
+                (void) rmdir(p);
         }
 
         expose_port_flush(&fw_ctx, arg_expose_ports, AF_INET,  &expose_args.address4);

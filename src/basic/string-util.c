@@ -1420,18 +1420,6 @@ char *find_line_startswith(const char *haystack, const char *needle) {
         return p + strlen(needle);
 }
 
-char *startswith_strv(const char *string, char **strv) {
-        char *found = NULL;
-
-        STRV_FOREACH(i, strv) {
-                found = startswith(string, *i);
-                if (found)
-                        break;
-        }
-
-        return found;
-}
-
 bool version_is_valid(const char *s) {
         if (isempty(s))
                 return false;
@@ -1521,24 +1509,20 @@ ssize_t strlevenshtein(const char *x, const char *y) {
 }
 
 char *strrstr(const char *haystack, const char *needle) {
-        const char *f = NULL;
-        size_t l;
-
-        /* Like strstr() but returns the last rather than the first occurence of "needle" in "haystack". */
+        /* Like strstr() but returns the last rather than the first occurrence of "needle" in "haystack". */
 
         if (!haystack || !needle)
                 return NULL;
 
-        l = strlen(needle);
-
-        /* Special case: for the empty string we return the very last possible occurence, i.e. *after* the
+        /* Special case: for the empty string we return the very last possible occurrence, i.e. *after* the
          * last char, not before. */
-        if (l == 0)
+        if (*needle == 0)
                 return strchr(haystack, 0);
 
-        for (const char *p = haystack; *p; p++)
-                if (strncmp(p, needle, l) == 0)
-                        f = p;
-
-        return (char*) f;
+        for (const char *p = strstr(haystack, needle), *q; p; p = q) {
+                q = strstr(p + 1, needle);
+                if (!q)
+                        return (char *) p;
+        }
+        return NULL;
 }

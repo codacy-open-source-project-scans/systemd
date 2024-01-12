@@ -13,10 +13,10 @@ typedef enum PickFlags {
 
 typedef struct PickFilter {
         uint32_t type_mask;           /* A mask of 1U << DT_REG, 1U << DT_DIR, … */
-        const char *basename;         /* Can be overriden by search pattern */
+        const char *basename;         /* Can be overridden by search pattern */
         const char *version;
         Architecture architecture;
-        const char *suffix;           /* Can be overriden by search pattern */
+        const char *suffix;           /* Can be overridden by search pattern */
 } PickFilter;
 
 typedef struct PickResult {
@@ -38,7 +38,7 @@ typedef struct PickResult {
                 .tries_done = UINT_MAX,                 \
         }
 
-#define TAKE_PICK_RESULT(ptr) TAKE_GENERIC(ptr, PickResult, PICK_RESULT_NULL)
+#define TAKE_PICK_RESULT(pick) TAKE_GENERIC(pick, PickResult, PICK_RESULT_NULL)
 
 void pick_result_done(PickResult *p);
 

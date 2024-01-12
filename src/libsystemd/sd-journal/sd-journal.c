@@ -43,7 +43,7 @@
 #include "string-util.h"
 #include "strv.h"
 #include "syslog-util.h"
-#include "uid-alloc-range.h"
+#include "uid-classification.h"
 
 #define JOURNAL_FILES_RECHECK_USEC (2 * USEC_PER_SEC)
 
@@ -2326,6 +2326,8 @@ _public_ void sd_journal_close(sd_journal *j) {
         }
 
         hashmap_free_free(j->errors);
+
+        set_free(j->exclude_syslog_identifiers);
 
         free(j->path);
         free(j->prefix);

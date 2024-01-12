@@ -35,8 +35,6 @@ int route_new(Route **ret) {
                 .type = RTN_UNICAST,
                 .table = RT_TABLE_MAIN,
                 .lifetime_usec = USEC_INFINITY,
-                .quickack = -1,
-                .fast_open_no_cookie = -1,
                 .gateway_onlink = -1,
         };
 
@@ -45,7 +43,7 @@ int route_new(Route **ret) {
         return 0;
 }
 
-static int route_new_static(Network *network, const char *filename, unsigned section_line, Route **ret) {
+int route_new_static(Network *network, const char *filename, unsigned section_line, Route **ret) {
         _cleanup_(config_section_freep) ConfigSection *n = NULL;
         _cleanup_(route_freep) Route *route = NULL;
         int r;
@@ -103,10 +101,8 @@ Route *route_free(Route *route) {
                 set_remove(route->manager->routes, route);
 
         ordered_set_free_with_destructor(route->multipath_routes, multipath_route_free);
-
+        route_metric_done(&route->metric);
         sd_event_source_disable_unref(route->expire);
-
-        free(route->tcp_congestion_control_algo);
 
         return mfree(route);
 }
@@ -139,11 +135,7 @@ static void route_hash_func(const Route *route, struct siphash *state) {
                 siphash24_compress_typesafe(route->protocol, state);
                 siphash24_compress_typesafe(route->scope, state);
                 siphash24_compress_typesafe(route->type, state);
-
-                siphash24_compress_typesafe(route->initcwnd, state);
-                siphash24_compress_typesafe(route->initrwnd, state);
-
-                siphash24_compress_typesafe(route->advmss, state);
+                route_metric_hash_func(&route->metric, state);
                 siphash24_compress_typesafe(route->nexthop_id, state);
 
                 break;
@@ -221,15 +213,7 @@ static int route_compare_func(const Route *a, const Route *b) {
                 if (r != 0)
                         return r;
 
-                r = CMP(a->initcwnd, b->initcwnd);
-                if (r != 0)
-                        return r;
-
-                r = CMP(a->initrwnd, b->initrwnd);
-                if (r != 0)
-                        return r;
-
-                r = CMP(a->advmss, b->advmss);
+                r = route_metric_compare_func(&a->metric, &b->metric);
                 if (r != 0)
                         return r;
 
@@ -337,10 +321,10 @@ int route_dup(const Route *src, Route **ret) {
         dest->link = NULL;
         dest->manager = NULL;
         dest->multipath_routes = NULL;
+        dest->metric = ROUTE_METRIC_NULL;
         dest->expire = NULL;
-        dest->tcp_congestion_control_algo = NULL;
 
-        r = free_and_strdup(&dest->tcp_congestion_control_algo, src->tcp_congestion_control_algo);
+        r = route_metric_copy(&src->metric, &dest->metric);
         if (r < 0)
                 return r;
 
@@ -1187,65 +1171,8 @@ static int route_configure(const Route *route, uint32_t lifetime_sec, Link *link
                         return r;
         }
 
-        r = sd_netlink_message_open_container(m, RTA_METRICS);
-        if (r < 0)
-                return r;
-
-        if (route->mtu > 0) {
-                r = sd_netlink_message_append_u32(m, RTAX_MTU, route->mtu);
-                if (r < 0)
-                        return r;
-        }
-
-        if (route->initcwnd > 0) {
-                r = sd_netlink_message_append_u32(m, RTAX_INITCWND, route->initcwnd);
-                if (r < 0)
-                        return r;
-        }
-
-        if (route->initrwnd > 0) {
-                r = sd_netlink_message_append_u32(m, RTAX_INITRWND, route->initrwnd);
-                if (r < 0)
-                        return r;
-        }
-
-        if (route->quickack >= 0) {
-                r = sd_netlink_message_append_u32(m, RTAX_QUICKACK, route->quickack);
-                if (r < 0)
-                        return r;
-        }
-
-        if (route->fast_open_no_cookie >= 0) {
-                r = sd_netlink_message_append_u32(m, RTAX_FASTOPEN_NO_COOKIE, route->fast_open_no_cookie);
-                if (r < 0)
-                        return r;
-        }
-
-        if (route->advmss > 0) {
-                r = sd_netlink_message_append_u32(m, RTAX_ADVMSS, route->advmss);
-                if (r < 0)
-                        return r;
-        }
-
-        if (!isempty(route->tcp_congestion_control_algo)) {
-                r = sd_netlink_message_append_string(m, RTAX_CC_ALGO, route->tcp_congestion_control_algo);
-                if (r < 0)
-                        return r;
-        }
-
-        if (route->hop_limit > 0) {
-                r = sd_netlink_message_append_u32(m, RTAX_HOPLIMIT, route->hop_limit);
-                if (r < 0)
-                        return r;
-        }
-
-        if (route->tcp_rto_usec > 0) {
-                r = sd_netlink_message_append_u32(m, RTAX_RTO_MIN, DIV_ROUND_UP(route->tcp_rto_usec, USEC_PER_MSEC));
-                if (r < 0)
-                        return r;
-        }
-
-        r = sd_netlink_message_close_container(m);
+        /* metrics */
+        r = route_metric_set_netlink_message(&route->metric, m);
         if (r < 0)
                 return r;
 
@@ -1277,20 +1204,14 @@ static int route_is_ready_to_configure(const Route *route, Link *link) {
                 struct nexthop_grp *nhg;
                 NextHop *nh;
 
-                if (nexthop_get_by_id(link->manager, route->nexthop_id, &nh) < 0)
-                        return false;
-
-                if (!nexthop_exists(nh))
-                        return false;
+                r = nexthop_is_ready(link->manager, route->nexthop_id, &nh);
+                if (r <= 0)
+                        return r;
 
                 HASHMAP_FOREACH(nhg, nh->group) {
-                        NextHop *g;
-
-                        if (nexthop_get_by_id(link->manager, nhg->id, &g) < 0)
-                                return false;
-
-                        if (!nexthop_exists(g))
-                                return false;
+                        r = nexthop_is_ready(link->manager, nhg->id, NULL);
+                        if (r <= 0)
+                                return r;
                 }
         }
 
@@ -1857,36 +1778,9 @@ int manager_rtnl_process_route(sd_netlink *rtnl, sd_netlink_message *message, Ma
                 return 0;
         }
 
-        r = sd_netlink_message_enter_container(message, RTA_METRICS);
-        if (r < 0 && r != -ENODATA) {
-                log_link_error_errno(link, r, "rtnl: Could not enter RTA_METRICS container, ignoring: %m");
+        /* metrics */
+        if (route_metric_read_netlink_message(&tmp->metric, message) < 0)
                 return 0;
-        }
-        if (r >= 0) {
-                r = sd_netlink_message_read_u32(message, RTAX_INITCWND, &tmp->initcwnd);
-                if (r < 0 && r != -ENODATA) {
-                        log_link_warning_errno(link, r, "rtnl: received route message with invalid initcwnd, ignoring: %m");
-                        return 0;
-                }
-
-                r = sd_netlink_message_read_u32(message, RTAX_INITRWND, &tmp->initrwnd);
-                if (r < 0 && r != -ENODATA) {
-                        log_link_warning_errno(link, r, "rtnl: received route message with invalid initrwnd, ignoring: %m");
-                        return 0;
-                }
-
-                r = sd_netlink_message_read_u32(message, RTAX_ADVMSS, &tmp->advmss);
-                if (r < 0 && r != -ENODATA) {
-                        log_link_warning_errno(link, r, "rtnl: received route message with invalid advmss, ignoring: %m");
-                        return 0;
-                }
-
-                r = sd_netlink_message_exit_container(message);
-                if (r < 0) {
-                        log_link_error_errno(link, r, "rtnl: Could not exit from RTA_METRICS container, ignoring: %m");
-                        return 0;
-                }
-        }
 
         r = sd_netlink_message_read_data(message, RTA_MULTIPATH, &rta_len, &rta_multipath);
         if (r < 0 && r != -ENODATA) {
@@ -1936,7 +1830,7 @@ int manager_rtnl_process_route(sd_netlink *rtnl, sd_netlink_message *message, Ma
 }
 
 int network_add_ipv4ll_route(Network *network) {
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         unsigned section_line;
         int r;
 
@@ -1950,28 +1844,28 @@ int network_add_ipv4ll_route(Network *network) {
                 return r;
 
         /* IPv4LLRoute= is in [Network] section. */
-        r = route_new_static(network, network->filename, section_line, &n);
+        r = route_new_static(network, network->filename, section_line, &route);
         if (r < 0)
                 return r;
 
-        r = in_addr_from_string(AF_INET, "169.254.0.0", &n->dst);
+        r = in_addr_from_string(AF_INET, "169.254.0.0", &route->dst);
         if (r < 0)
                 return r;
 
-        n->family = AF_INET;
-        n->dst_prefixlen = 16;
-        n->scope = RT_SCOPE_LINK;
-        n->scope_set = true;
-        n->table_set = true;
-        n->priority = IPV4LL_ROUTE_METRIC;
-        n->protocol = RTPROT_STATIC;
+        route->family = AF_INET;
+        route->dst_prefixlen = 16;
+        route->scope = RT_SCOPE_LINK;
+        route->scope_set = true;
+        route->table_set = true;
+        route->priority = IPV4LL_ROUTE_METRIC;
+        route->protocol = RTPROT_STATIC;
 
-        TAKE_PTR(n);
+        TAKE_PTR(route);
         return 0;
 }
 
 int network_add_default_route_on_device(Network *network) {
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         unsigned section_line;
         int r;
 
@@ -1985,16 +1879,16 @@ int network_add_default_route_on_device(Network *network) {
                 return r;
 
         /* DefaultRouteOnDevice= is in [Network] section. */
-        r = route_new_static(network, network->filename, section_line, &n);
+        r = route_new_static(network, network->filename, section_line, &route);
         if (r < 0)
                 return r;
 
-        n->family = AF_INET;
-        n->scope = RT_SCOPE_LINK;
-        n->scope_set = true;
-        n->protocol = RTPROT_STATIC;
+        route->family = AF_INET;
+        route->scope = RT_SCOPE_LINK;
+        route->scope_set = true;
+        route->protocol = RTPROT_STATIC;
 
-        TAKE_PTR(n);
+        TAKE_PTR(route);
         return 0;
 }
 
@@ -2011,7 +1905,7 @@ int config_parse_gateway(
                 void *userdata) {
 
         Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         int r;
 
         assert(filename);
@@ -2022,7 +1916,7 @@ int config_parse_gateway(
 
         if (streq(section, "Network")) {
                 /* we are not in an Route section, so use line number instead */
-                r = route_new_static(network, filename, line, &n);
+                r = route_new_static(network, filename, line, &route);
                 if (r == -ENOMEM)
                         return log_oom();
                 if (r < 0) {
@@ -2031,7 +1925,7 @@ int config_parse_gateway(
                         return 0;
                 }
         } else {
-                r = route_new_static(network, filename, section_line, &n);
+                r = route_new_static(network, filename, section_line, &route);
                 if (r == -ENOMEM)
                         return log_oom();
                 if (r < 0) {
@@ -2041,43 +1935,43 @@ int config_parse_gateway(
                 }
 
                 if (isempty(rvalue)) {
-                        n->gateway_from_dhcp_or_ra = false;
-                        n->gw_family = AF_UNSPEC;
-                        n->gw = IN_ADDR_NULL;
-                        TAKE_PTR(n);
+                        route->gateway_from_dhcp_or_ra = false;
+                        route->gw_family = AF_UNSPEC;
+                        route->gw = IN_ADDR_NULL;
+                        TAKE_PTR(route);
                         return 0;
                 }
 
                 if (streq(rvalue, "_dhcp")) {
-                        n->gateway_from_dhcp_or_ra = true;
-                        TAKE_PTR(n);
+                        route->gateway_from_dhcp_or_ra = true;
+                        TAKE_PTR(route);
                         return 0;
                 }
 
                 if (streq(rvalue, "_dhcp4")) {
-                        n->gw_family = AF_INET;
-                        n->gateway_from_dhcp_or_ra = true;
-                        TAKE_PTR(n);
+                        route->gw_family = AF_INET;
+                        route->gateway_from_dhcp_or_ra = true;
+                        TAKE_PTR(route);
                         return 0;
                 }
 
                 if (streq(rvalue, "_ipv6ra")) {
-                        n->gw_family = AF_INET6;
-                        n->gateway_from_dhcp_or_ra = true;
-                        TAKE_PTR(n);
+                        route->gw_family = AF_INET6;
+                        route->gateway_from_dhcp_or_ra = true;
+                        TAKE_PTR(route);
                         return 0;
                 }
         }
 
-        r = in_addr_from_string_auto(rvalue, &n->gw_family, &n->gw);
+        r = in_addr_from_string_auto(rvalue, &route->gw_family, &route->gw);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Invalid %s='%s', ignoring assignment: %m", lvalue, rvalue);
                 return 0;
         }
 
-        n->gateway_from_dhcp_or_ra = false;
-        TAKE_PTR(n);
+        route->gateway_from_dhcp_or_ra = false;
+        TAKE_PTR(route);
         return 0;
 }
 
@@ -2094,7 +1988,7 @@ int config_parse_preferred_src(
                 void *userdata) {
 
         Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         int r;
 
         assert(filename);
@@ -2103,7 +1997,7 @@ int config_parse_preferred_src(
         assert(rvalue);
         assert(data);
 
-        r = route_new_static(network, filename, section_line, &n);
+        r = route_new_static(network, filename, section_line, &route);
         if (r == -ENOMEM)
                 return log_oom();
         if (r < 0) {
@@ -2112,17 +2006,17 @@ int config_parse_preferred_src(
                 return 0;
         }
 
-        if (n->family == AF_UNSPEC)
-                r = in_addr_from_string_auto(rvalue, &n->family, &n->prefsrc);
+        if (route->family == AF_UNSPEC)
+                r = in_addr_from_string_auto(rvalue, &route->family, &route->prefsrc);
         else
-                r = in_addr_from_string(n->family, rvalue, &n->prefsrc);
+                r = in_addr_from_string(route->family, rvalue, &route->prefsrc);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, EINVAL,
                            "Invalid %s='%s', ignoring assignment: %m", lvalue, rvalue);
                 return 0;
         }
 
-        TAKE_PTR(n);
+        TAKE_PTR(route);
         return 0;
 }
 
@@ -2139,7 +2033,7 @@ int config_parse_destination(
                 void *userdata) {
 
         Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         union in_addr_union *buffer;
         unsigned char *prefixlen;
         int r;
@@ -2150,7 +2044,7 @@ int config_parse_destination(
         assert(rvalue);
         assert(data);
 
-        r = route_new_static(network, filename, section_line, &n);
+        r = route_new_static(network, filename, section_line, &route);
         if (r == -ENOMEM)
                 return log_oom();
         if (r < 0) {
@@ -2160,27 +2054,27 @@ int config_parse_destination(
         }
 
         if (streq(lvalue, "Destination")) {
-                buffer = &n->dst;
-                prefixlen = &n->dst_prefixlen;
+                buffer = &route->dst;
+                prefixlen = &route->dst_prefixlen;
         } else if (streq(lvalue, "Source")) {
-                buffer = &n->src;
-                prefixlen = &n->src_prefixlen;
+                buffer = &route->src;
+                prefixlen = &route->src_prefixlen;
         } else
                 assert_not_reached();
 
-        if (n->family == AF_UNSPEC)
-                r = in_addr_prefix_from_string_auto(rvalue, &n->family, buffer, prefixlen);
+        if (route->family == AF_UNSPEC)
+                r = in_addr_prefix_from_string_auto(rvalue, &route->family, buffer, prefixlen);
         else
-                r = in_addr_prefix_from_string(rvalue, n->family, buffer, prefixlen);
+                r = in_addr_prefix_from_string(rvalue, route->family, buffer, prefixlen);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, EINVAL,
                            "Invalid %s='%s', ignoring assignment: %m", lvalue, rvalue);
                 return 0;
         }
 
-        (void) in_addr_mask(n->family, buffer, *prefixlen);
+        (void) in_addr_mask(route->family, buffer, *prefixlen);
 
-        TAKE_PTR(n);
+        TAKE_PTR(route);
         return 0;
 }
 
@@ -2197,7 +2091,7 @@ int config_parse_route_priority(
                 void *userdata) {
 
         Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         int r;
 
         assert(filename);
@@ -2206,7 +2100,7 @@ int config_parse_route_priority(
         assert(rvalue);
         assert(data);
 
-        r = route_new_static(network, filename, section_line, &n);
+        r = route_new_static(network, filename, section_line, &route);
         if (r == -ENOMEM)
                 return log_oom();
         if (r < 0) {
@@ -2215,15 +2109,15 @@ int config_parse_route_priority(
                 return 0;
         }
 
-        r = safe_atou32(rvalue, &n->priority);
+        r = safe_atou32(rvalue, &route->priority);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Could not parse route priority \"%s\", ignoring assignment: %m", rvalue);
                 return 0;
         }
 
-        n->priority_set = true;
-        TAKE_PTR(n);
+        route->priority_set = true;
+        TAKE_PTR(route);
         return 0;
 }
 
@@ -2240,7 +2134,7 @@ int config_parse_route_scope(
                 void *userdata) {
 
         Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         int r;
 
         assert(filename);
@@ -2249,7 +2143,7 @@ int config_parse_route_scope(
         assert(rvalue);
         assert(data);
 
-        r = route_new_static(network, filename, section_line, &n);
+        r = route_new_static(network, filename, section_line, &route);
         if (r == -ENOMEM)
                 return log_oom();
         if (r < 0) {
@@ -2264,62 +2158,9 @@ int config_parse_route_scope(
                 return 0;
         }
 
-        n->scope = r;
-        n->scope_set = true;
-        TAKE_PTR(n);
-        return 0;
-}
-
-int config_parse_route_nexthop(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
-        uint32_t id;
-        int r;
-
-        assert(filename);
-        assert(section);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        r = route_new_static(network, filename, section_line, &n);
-        if (r == -ENOMEM)
-                return log_oom();
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to allocate route, ignoring assignment: %m");
-                return 0;
-        }
-
-        if (isempty(rvalue)) {
-                n->nexthop_id = 0;
-                TAKE_PTR(n);
-                return 0;
-        }
-
-        r = safe_atou32(rvalue, &id);
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to parse nexthop ID, ignoring assignment: %s", rvalue);
-                return 0;
-        }
-        if (id == 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, 0, "Invalid nexthop ID, ignoring assignment: %s", rvalue);
-                return 0;
-        }
-
-        n->nexthop_id = id;
-        TAKE_PTR(n);
+        route->scope = r;
+        route->scope_set = true;
+        TAKE_PTR(route);
         return 0;
 }
 
@@ -2335,7 +2176,7 @@ int config_parse_route_table(
                 void *data,
                 void *userdata) {
 
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         Network *network = userdata;
         int r;
 
@@ -2345,7 +2186,7 @@ int config_parse_route_table(
         assert(rvalue);
         assert(data);
 
-        r = route_new_static(network, filename, section_line, &n);
+        r = route_new_static(network, filename, section_line, &route);
         if (r == -ENOMEM)
                 return log_oom();
         if (r < 0) {
@@ -2354,19 +2195,19 @@ int config_parse_route_table(
                 return 0;
         }
 
-        r = manager_get_route_table_from_string(network->manager, rvalue, &n->table);
+        r = manager_get_route_table_from_string(network->manager, rvalue, &route->table);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Could not parse route table \"%s\", ignoring assignment: %m", rvalue);
                 return 0;
         }
 
-        n->table_set = true;
-        TAKE_PTR(n);
+        route->table_set = true;
+        TAKE_PTR(route);
         return 0;
 }
 
-int config_parse_route_boolean(
+int config_parse_route_gateway_onlink(
                 const char *unit,
                 const char *filename,
                 unsigned line,
@@ -2379,7 +2220,7 @@ int config_parse_route_boolean(
                 void *userdata) {
 
         Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         int r;
 
         assert(filename);
@@ -2388,7 +2229,7 @@ int config_parse_route_boolean(
         assert(rvalue);
         assert(data);
 
-        r = route_new_static(network, filename, section_line, &n);
+        r = route_new_static(network, filename, section_line, &route);
         if (r == -ENOMEM)
                 return log_oom();
         if (r < 0) {
@@ -2404,16 +2245,9 @@ int config_parse_route_boolean(
                 return 0;
         }
 
-        if (STR_IN_SET(lvalue, "GatewayOnLink", "GatewayOnlink"))
-                n->gateway_onlink = r;
-        else if (streq(lvalue, "QuickAck"))
-                n->quickack = r;
-        else if (streq(lvalue, "FastOpenNoCookie"))
-                n->fast_open_no_cookie = r;
-        else
-                assert_not_reached();
+        route->gateway_onlink = r;
 
-        TAKE_PTR(n);
+        TAKE_PTR(route);
         return 0;
 }
 
@@ -2430,10 +2264,10 @@ int config_parse_ipv6_route_preference(
                 void *userdata) {
 
         Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         int r;
 
-        r = route_new_static(network, filename, section_line, &n);
+        r = route_new_static(network, filename, section_line, &route);
         if (r == -ENOMEM)
                 return log_oom();
         if (r < 0) {
@@ -2443,18 +2277,18 @@ int config_parse_ipv6_route_preference(
         }
 
         if (streq(rvalue, "low"))
-                n->pref = ICMPV6_ROUTER_PREF_LOW;
+                route->pref = ICMPV6_ROUTER_PREF_LOW;
         else if (streq(rvalue, "medium"))
-                n->pref = ICMPV6_ROUTER_PREF_MEDIUM;
+                route->pref = ICMPV6_ROUTER_PREF_MEDIUM;
         else if (streq(rvalue, "high"))
-                n->pref = ICMPV6_ROUTER_PREF_HIGH;
+                route->pref = ICMPV6_ROUTER_PREF_HIGH;
         else {
                 log_syntax(unit, LOG_WARNING, filename, line, 0, "Unknown route preference: %s", rvalue);
                 return 0;
         }
 
-        n->pref_set = true;
-        TAKE_PTR(n);
+        route->pref_set = true;
+        TAKE_PTR(route);
         return 0;
 }
 
@@ -2471,10 +2305,10 @@ int config_parse_route_protocol(
                 void *userdata) {
 
         Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         int r;
 
-        r = route_new_static(network, filename, section_line, &n);
+        r = route_new_static(network, filename, section_line, &route);
         if (r == -ENOMEM)
                 return log_oom();
         if (r < 0) {
@@ -2490,9 +2324,9 @@ int config_parse_route_protocol(
                 return 0;
         }
 
-        n->protocol = r;
+        route->protocol = r;
 
-        TAKE_PTR(n);
+        TAKE_PTR(route);
         return 0;
 }
 
@@ -2509,10 +2343,10 @@ int config_parse_route_type(
                 void *userdata) {
 
         Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
+        _cleanup_(route_free_or_set_invalidp) Route *route = NULL;
         int t, r;
 
-        r = route_new_static(network, filename, section_line, &n);
+        r = route_new_static(network, filename, section_line, &route);
         if (r == -ENOMEM)
                 return log_oom();
         if (r < 0) {
@@ -2528,465 +2362,9 @@ int config_parse_route_type(
                 return 0;
         }
 
-        n->type = (unsigned char) t;
+        route->type = (unsigned char) t;
 
-        TAKE_PTR(n);
-        return 0;
-}
-
-int config_parse_route_hop_limit(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
-        Network *network = userdata;
-        uint32_t k;
-        int r;
-
-        assert(filename);
-        assert(section);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        r = route_new_static(network, filename, section_line, &n);
-        if (r == -ENOMEM)
-                return log_oom();
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to allocate route, ignoring assignment: %m");
-                return 0;
-        }
-
-        if (isempty(rvalue)) {
-                n->hop_limit = 0;
-                TAKE_PTR(n);
-                return 0;
-        }
-
-        r = safe_atou32(rvalue, &k);
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Could not parse per route hop limit, ignoring assignment: %s", rvalue);
-                return 0;
-        }
-        if (k > 255) {
-                log_syntax(unit, LOG_WARNING, filename, line, 0,
-                           "Specified per route hop limit \"%s\" is too large, ignoring assignment: %m", rvalue);
-                return 0;
-        }
-        if (k == 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, 0,
-                           "Invalid per route hop limit \"%s\", ignoring assignment: %m", rvalue);
-                return 0;
-        }
-
-        n->hop_limit = k;
-
-        TAKE_PTR(n);
-        return 0;
-}
-
-int config_parse_tcp_congestion(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
-        int r;
-
-        assert(filename);
-        assert(section);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        r = route_new_static(network, filename, section_line, &n);
-        if (r == -ENOMEM)
-                return log_oom();
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to allocate route, ignoring assignment: %m");
-                return 0;
-        }
-
-        r = config_parse_string(unit, filename, line, section, section_line, lvalue, ltype,
-                                rvalue, &n->tcp_congestion_control_algo, userdata);
-        if (r < 0)
-                return r;
-
-        TAKE_PTR(n);
-        return 0;
-}
-
-int config_parse_tcp_advmss(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
-        Network *network = userdata;
-        uint64_t u;
-        int r;
-
-        assert(filename);
-        assert(section);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        r = route_new_static(network, filename, section_line, &n);
-        if (r == -ENOMEM)
-                return log_oom();
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to allocate route, ignoring assignment: %m");
-                return 0;
-        }
-
-        if (isempty(rvalue)) {
-                n->advmss = 0;
-                TAKE_PTR(n);
-                return 0;
-        }
-
-        r = parse_size(rvalue, 1024, &u);
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Could not parse TCPAdvertisedMaximumSegmentSize= \"%s\", ignoring assignment: %m", rvalue);
-                return 0;
-        }
-
-        if (u == 0 || u > UINT32_MAX) {
-                log_syntax(unit, LOG_WARNING, filename, line, 0,
-                           "Invalid TCPAdvertisedMaximumSegmentSize= \"%s\", ignoring assignment: %m", rvalue);
-                return 0;
-        }
-
-        n->advmss = u;
-
-        TAKE_PTR(n);
-        return 0;
-}
-
-int config_parse_tcp_window(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        uint32_t *window = ASSERT_PTR(data);
-        uint32_t k;
-        int r;
-
-        assert(filename);
-        assert(section);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        r = safe_atou32(rvalue, &k);
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Could not parse TCP %s \"%s\", ignoring assignment: %m", lvalue, rvalue);
-                return 0;
-        }
-        if (k >= 1024) {
-                log_syntax(unit, LOG_WARNING, filename, line, 0,
-                           "Specified TCP %s \"%s\" is too large, ignoring assignment: %m", lvalue, rvalue);
-                return 0;
-        }
-        if (k == 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, 0,
-                           "Invalid TCP %s \"%s\", ignoring assignment: %m", lvalue, rvalue);
-                return 0;
-        }
-
-        *window = k;
-        return 0;
-}
-
-int config_parse_route_tcp_window(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
-        Network *network = userdata;
-        uint32_t *d;
-        int r;
-
-        assert(filename);
-        assert(section);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        r = route_new_static(network, filename, section_line, &n);
-        if (r == -ENOMEM)
-                return log_oom();
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to allocate route, ignoring assignment: %m");
-                return 0;
-        }
-
-        if (streq(lvalue, "InitialCongestionWindow"))
-                d = &n->initcwnd;
-        else if (streq(lvalue, "InitialAdvertisedReceiveWindow"))
-                d = &n->initrwnd;
-        else
-                assert_not_reached();
-
-        r = config_parse_tcp_window(unit, filename, line, section, section_line, lvalue, ltype, rvalue, d, userdata);
-        if (r < 0)
-                return r;
-
-        TAKE_PTR(n);
-        return 0;
-}
-
-int config_parse_route_mtu(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
-        int r;
-
-        assert(filename);
-        assert(section);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        r = route_new_static(network, filename, section_line, &n);
-        if (r == -ENOMEM)
-                return log_oom();
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to allocate route, ignoring assignment: %m");
-                return 0;
-        }
-
-        r = config_parse_mtu(unit, filename, line, section, section_line, lvalue, ltype, rvalue, &n->mtu, userdata);
-        if (r < 0)
-                return r;
-
-        TAKE_PTR(n);
-        return 0;
-}
-
-int config_parse_route_tcp_rto(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        Network *network = userdata;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
-        usec_t usec;
-        int r;
-
-        assert(filename);
-        assert(section);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        r = route_new_static(network, filename, section_line, &n);
-        if (r == -ENOMEM)
-                return log_oom();
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to allocate route, ignoring assignment: %m");
-                return 0;
-        }
-
-        r = parse_sec(rvalue, &usec);
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to parse route TCP retransmission timeout (RTO), ignoring assignment: %s", rvalue);
-                return 0;
-        }
-
-        if (!timestamp_is_set(usec) ||
-            DIV_ROUND_UP(usec, USEC_PER_MSEC) > UINT32_MAX) {
-                log_syntax(unit, LOG_WARNING, filename, line, 0,
-                           "Route TCP retransmission timeout (RTO) must be in the range 0…%"PRIu32"ms, ignoring assignment: %s", UINT32_MAX, rvalue);
-                return 0;
-        }
-
-        n->tcp_rto_usec = usec;
-
-        TAKE_PTR(n);
-        return 0;
-}
-
-int config_parse_multipath_route(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        _cleanup_(multipath_route_freep) MultipathRoute *m = NULL;
-        _cleanup_(route_free_or_set_invalidp) Route *n = NULL;
-        _cleanup_free_ char *word = NULL;
-        Network *network = userdata;
-        union in_addr_union a;
-        int family, r;
-        const char *p;
-        char *dev;
-
-        assert(filename);
-        assert(section);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        r = route_new_static(network, filename, section_line, &n);
-        if (r == -ENOMEM)
-                return log_oom();
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to allocate route, ignoring assignment: %m");
-                return 0;
-        }
-
-        if (isempty(rvalue)) {
-                n->multipath_routes = ordered_set_free_with_destructor(n->multipath_routes, multipath_route_free);
-                return 0;
-        }
-
-        m = new0(MultipathRoute, 1);
-        if (!m)
-                return log_oom();
-
-        p = rvalue;
-        r = extract_first_word(&p, &word, NULL, 0);
-        if (r == -ENOMEM)
-                return log_oom();
-        if (r <= 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Invalid multipath route option, ignoring assignment: %s", rvalue);
-                return 0;
-        }
-
-        dev = strchr(word, '@');
-        if (dev) {
-                *dev++ = '\0';
-
-                r = parse_ifindex(dev);
-                if (r > 0)
-                        m->ifindex = r;
-                else {
-                        if (!ifname_valid_full(dev, IFNAME_VALID_ALTERNATIVE)) {
-                                log_syntax(unit, LOG_WARNING, filename, line, 0,
-                                           "Invalid interface name '%s' in %s=, ignoring: %s", dev, lvalue, rvalue);
-                                return 0;
-                        }
-
-                        m->ifname = strdup(dev);
-                        if (!m->ifname)
-                                return log_oom();
-                }
-        }
-
-        r = in_addr_from_string_auto(word, &family, &a);
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Invalid multipath route gateway '%s', ignoring assignment: %m", rvalue);
-                return 0;
-        }
-        m->gateway.address = a;
-        m->gateway.family = family;
-
-        if (!isempty(p)) {
-                r = safe_atou32(p, &m->weight);
-                if (r < 0) {
-                        log_syntax(unit, LOG_WARNING, filename, line, r,
-                                   "Invalid multipath route weight, ignoring assignment: %s", p);
-                        return 0;
-                }
-                /* ip command takes weight in the range 1…255, while kernel takes the value in the
-                 * range 0…254. MultiPathRoute= setting also takes weight in the same range which ip
-                 * command uses, then networkd decreases by one and stores it to match the range which
-                 * kernel uses. */
-                if (m->weight == 0 || m->weight > 256) {
-                        log_syntax(unit, LOG_WARNING, filename, line, 0,
-                                   "Invalid multipath route weight, ignoring assignment: %s", p);
-                        return 0;
-                }
-                m->weight--;
-        }
-
-        r = ordered_set_ensure_put(&n->multipath_routes, NULL, m);
-        if (r == -ENOMEM)
-                return log_oom();
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to store multipath route, ignoring assignment: %m");
-                return 0;
-        }
-
-        TAKE_PTR(m);
-        TAKE_PTR(n);
+        TAKE_PTR(route);
         return 0;
 }
 

@@ -46,7 +46,7 @@
 #include "strv.h"
 #include "terminal-util.h"
 #include "tmpfile-util.h"
-#include "uid-alloc-range.h"
+#include "uid-classification.h"
 #include "user-util.h"
 #include "vpick.h"
 
@@ -423,7 +423,7 @@ static int parse_argv(int argc, char *argv[]) {
                         _cleanup_free_ void *p = NULL;
                         size_t l;
 
-                        r = unhexmem(optarg, strlen(optarg), &p, &l);
+                        r = unhexmem(optarg, &p, &l);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to parse root hash '%s': %m", optarg);
                         if (l < sizeof(sd_id128_t))
@@ -441,7 +441,7 @@ static int parse_argv(int argc, char *argv[]) {
                         void *p;
 
                         if ((value = startswith(optarg, "base64:"))) {
-                                r = unbase64mem(value, strlen(value), &p, &l);
+                                r = unbase64mem(value, &p, &l);
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to parse root hash signature '%s': %m", optarg);
                         } else {
@@ -1708,6 +1708,8 @@ static int action_detach(const char *path) {
         _cleanup_close_ int fd = -EBADF;
         struct stat st;
         int r;
+
+        assert(path);
 
         fd = open(path, O_PATH|O_CLOEXEC);
         if (fd < 0)

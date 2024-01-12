@@ -9,6 +9,8 @@
 #include "conf-parser.h"
 #include "in-addr-util.h"
 #include "networkd-link.h"
+#include "networkd-route-metric.h"
+#include "networkd-route-nexthop.h"
 #include "networkd-util.h"
 
 typedef struct Manager Manager;
@@ -34,8 +36,6 @@ struct Route {
         int family;
         int gw_family;
         uint32_t gw_weight;
-        int quickack;
-        int fast_open_no_cookie;
 
         unsigned char dst_prefixlen;
         unsigned char src_prefixlen;
@@ -45,17 +45,13 @@ struct Route {
         unsigned char tos;
         uint32_t priority; /* note that ip(8) calls this 'metric' */
         uint32_t table;
-        uint32_t mtu;
-        uint32_t initcwnd;
-        uint32_t initrwnd;
-        uint32_t advmss;
-        uint32_t hop_limit;
-        char *tcp_congestion_control_algo;
         unsigned char pref;
         unsigned flags;
         int gateway_onlink; /* Only used in conf parser and route_section_verify(). */
         uint32_t nexthop_id;
-        usec_t tcp_rto_usec;
+
+        /* metrics (RTA_METRICS) */
+        RouteMetric metric;
 
         bool scope_set:1;
         bool table_set:1;
@@ -80,6 +76,7 @@ struct Route {
 extern const struct hash_ops route_hash_ops;
 
 int route_new(Route **ret);
+int route_new_static(Network *network, const char *filename, unsigned section_line, Route **ret);
 Route *route_free(Route *route);
 DEFINE_SECTION_CLEANUP_FUNCTIONS(Route, route_free);
 int route_dup(const Route *src, Route **ret);
@@ -119,16 +116,7 @@ CONFIG_PARSER_PROTOTYPE(config_parse_destination);
 CONFIG_PARSER_PROTOTYPE(config_parse_route_priority);
 CONFIG_PARSER_PROTOTYPE(config_parse_route_scope);
 CONFIG_PARSER_PROTOTYPE(config_parse_route_table);
-CONFIG_PARSER_PROTOTYPE(config_parse_route_boolean);
+CONFIG_PARSER_PROTOTYPE(config_parse_route_gateway_onlink);
 CONFIG_PARSER_PROTOTYPE(config_parse_ipv6_route_preference);
 CONFIG_PARSER_PROTOTYPE(config_parse_route_protocol);
 CONFIG_PARSER_PROTOTYPE(config_parse_route_type);
-CONFIG_PARSER_PROTOTYPE(config_parse_route_tcp_window);
-CONFIG_PARSER_PROTOTYPE(config_parse_route_hop_limit);
-CONFIG_PARSER_PROTOTYPE(config_parse_tcp_window);
-CONFIG_PARSER_PROTOTYPE(config_parse_route_tcp_rto);
-CONFIG_PARSER_PROTOTYPE(config_parse_route_mtu);
-CONFIG_PARSER_PROTOTYPE(config_parse_multipath_route);
-CONFIG_PARSER_PROTOTYPE(config_parse_tcp_congestion);
-CONFIG_PARSER_PROTOTYPE(config_parse_tcp_advmss);
-CONFIG_PARSER_PROTOTYPE(config_parse_route_nexthop);

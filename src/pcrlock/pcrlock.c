@@ -74,8 +74,8 @@ STATIC_DESTRUCTOR_REGISTER(arg_policy_path, freep);
 #define PCRLOCK_FIRMWARE_CONFIG_LATE_PATH   "/var/lib/pcrlock.d/550-firmware-config-late.pcrlock.d/generated.pcrlock"
 #define PCRLOCK_GPT_PATH                    "/var/lib/pcrlock.d/600-gpt.pcrlock.d/generated.pcrlock"
 #define PCRLOCK_SECUREBOOT_AUTHORITY_PATH   "/var/lib/pcrlock.d/620-secureboot-authority.pcrlock.d/generated.pcrlock"
-#define PCRLOCK_KERNEL_CMDLINE_PATH         "/var/lib/pcrlock.d/710-kernel-cmdline.pcrlock/generated.pcrlock"
-#define PCRLOCK_KERNEL_INITRD_PATH          "/var/lib/pcrlock.d/720-kernel-initrd.pcrlock/generated.pcrlock"
+#define PCRLOCK_KERNEL_CMDLINE_PATH         "/var/lib/pcrlock.d/710-kernel-cmdline.pcrlock.d/generated.pcrlock"
+#define PCRLOCK_KERNEL_INITRD_PATH          "/var/lib/pcrlock.d/720-kernel-initrd.pcrlock.d/generated.pcrlock"
 #define PCRLOCK_MACHINE_ID_PATH             "/var/lib/pcrlock.d/820-machine-id.pcrlock"
 #define PCRLOCK_ROOT_FILE_SYSTEM_PATH       "/var/lib/pcrlock.d/830-root-file-system.pcrlock"
 #define PCRLOCK_FILE_SYSTEM_PATH_PREFIX     "/var/lib/pcrlock.d/840-file-system-"
@@ -4174,7 +4174,7 @@ static int verb_make_policy(int argc, char *argv[], void *userdata) {
          * policies).
          *
          * Whenever we want to lock an encrypted object (for example FDE) against this policy, we'll use a
-         * PolicyAuthorizeNV epxression that pins the NV index in the policy, and permits access to any
+         * PolicyAuthorizeNV expression that pins the NV index in the policy, and permits access to any
          * policies matching the current NV index contents.
          *
          * We grant world-readable read access to the NV index. Write access is controlled by a PIN (which we
@@ -4560,7 +4560,7 @@ static int verb_make_policy(int argc, char *argv[], void *userdata) {
                         return r;
         }
 
-        log_info("Written new policy to '%s' and digest to TPM2 NV index 0x%" PRIu32 ".", path, nv_index);
+        log_info("Written new policy to '%s' and digest to TPM2 NV index 0x%x.", path, nv_index);
 
         log_info("Overall time spent: %s", FORMAT_TIMESPAN(usec_sub_unsigned(now(CLOCK_MONOTONIC), start_usec), 1));
 
