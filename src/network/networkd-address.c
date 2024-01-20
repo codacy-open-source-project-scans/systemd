@@ -615,12 +615,12 @@ int address_dup(const Address *src, Address **ret) {
         dest->nft_set_context.n_sets = 0;
 
         if (src->family == AF_INET) {
-                r = free_and_strdup(&dest->label, src->label);
+                r = strdup_or_null(src->label, &dest->label);
                 if (r < 0)
                         return r;
         }
 
-        r = free_and_strdup(&dest->netlabel, src->netlabel);
+        r = strdup_or_null(src->netlabel, &dest->netlabel);
         if (r < 0)
                 return r;
 
@@ -1111,18 +1111,35 @@ static int address_set_netlink_message(const Address *address, sd_netlink_messag
         return 0;
 }
 
-static int address_remove_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
+static int address_remove_handler(sd_netlink *rtnl, sd_netlink_message *m, RemoveRequest *rreq) {
         int r;
 
         assert(m);
-        assert(link);
+        assert(rreq);
 
-        if (IN_SET(link->state, LINK_STATE_FAILED, LINK_STATE_LINGER))
+        Link *link = ASSERT_PTR(rreq->link);
+        Address *address = ASSERT_PTR(rreq->userdata);
+
+        if (link->state == LINK_STATE_LINGER)
                 return 0;
 
         r = sd_netlink_message_get_errno(m);
-        if (r < 0 && r != -EADDRNOTAVAIL)
-                log_link_message_warning_errno(link, m, r, "Could not drop address");
+        if (r < 0) {
+                log_link_message_full_errno(link, m,
+                                            (r == -EADDRNOTAVAIL || !address->link) ? LOG_DEBUG : LOG_WARNING,
+                                            r, "Could not drop address");
+
+                if (address->link) {
+                        /* If the address cannot be removed, then assume the address is already removed. */
+                        log_address_debug(address, "Forgetting", link);
+
+                        Request *req;
+                        if (address_get_request(link, address, &req) >= 0)
+                                address_enter_removed(req->userdata);
+
+                        (void) address_drop(address);
+                }
+        }
 
         return 1;
 }
@@ -1149,13 +1166,9 @@ int address_remove(Address *address, Link *link) {
         if (r < 0)
                 return log_link_warning_errno(link, r, "Could not set netlink attributes: %m");
 
-        r = netlink_call_async(link->manager->rtnl, NULL, m,
-                               address_remove_handler,
-                               link_netlink_destroy_callback, link);
+        r = link_remove_request_add(link, address, address, link->manager->rtnl, m, address_remove_handler);
         if (r < 0)
-                return log_link_warning_errno(link, r, "Could not send rtnetlink message: %m");
-
-        link_ref(link);
+                return log_link_warning_errno(link, r, "Could not queue rtnetlink message: %m");
 
         address_enter_removing(address);
 
@@ -1180,7 +1193,7 @@ int address_remove_and_cancel(Address *address, Link *link) {
          * notification about the request, then explicitly remove the address. */
         if (address_get_request(link, address, &req) >= 0) {
                 waiting = req->waiting_reply;
-                request_detach(link->manager, req);
+                request_detach(req);
                 address_cancel_requesting(address);
         }
 

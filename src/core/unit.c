@@ -2992,7 +2992,7 @@ int unit_enqueue_rewatch_pids(Unit *u) {
                 if (r < 0)
                         return log_error_errno(r, "Failed to allocate event source for tidying watched PIDs: %m");
 
-                r = sd_event_source_set_priority(s, SD_EVENT_PRIORITY_IDLE);
+                r = sd_event_source_set_priority(s, EVENT_PRIORITY_REWATCH_PIDS);
                 if (r < 0)
                         return log_error_errno(r, "Failed to adjust priority of event source for tidying watched PIDs: %m");
 
@@ -6530,16 +6530,12 @@ int activation_details_append_pair(ActivationDetails *details, char ***strv) {
                 return 0;
 
         if (!isempty(details->trigger_unit_name)) {
-                r = strv_extend(strv, "trigger_unit");
-                if (r < 0)
-                        return r;
-
-                r = strv_extend(strv, details->trigger_unit_name);
+                r = strv_extend_many(strv, "trigger_unit", details->trigger_unit_name);
                 if (r < 0)
                         return r;
         }
 
-        if (ACTIVATION_DETAILS_VTABLE(details)->append_env) {
+        if (ACTIVATION_DETAILS_VTABLE(details)->append_pair) {
                 r = ACTIVATION_DETAILS_VTABLE(details)->append_pair(details, strv);
                 if (r < 0)
                         return r;

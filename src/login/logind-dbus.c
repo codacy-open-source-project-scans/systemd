@@ -141,9 +141,9 @@ int manager_get_session_from_creds(
         assert(m);
         assert(ret);
 
-        if (SEAT_IS_SELF(name)) /* the caller's own session */
+        if (SESSION_IS_SELF(name)) /* the caller's own session */
                 return get_sender_session(m, message, false, error, ret);
-        if (SEAT_IS_AUTO(name)) /* The caller's own session if they have one, otherwise their user's display session */
+        if (SESSION_IS_AUTO(name)) /* The caller's own session if they have one, otherwise their user's display session */
                 return get_sender_session(m, message, true, error, ret);
 
         session = hashmap_get(m->sessions, name);
@@ -580,6 +580,60 @@ static int method_list_sessions(sd_bus_message *message, void *userdata, sd_bus_
                                           session->user->user_record->user_name,
                                           session->seat ? session->seat->id : "",
                                           p);
+                if (r < 0)
+                        return r;
+        }
+
+        r = sd_bus_message_close_container(reply);
+        if (r < 0)
+                return r;
+
+        return sd_bus_send(NULL, reply, NULL);
+}
+
+static int method_list_sessions_ex(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        Manager *m = ASSERT_PTR(userdata);
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        int r;
+
+        assert(message);
+
+        r = sd_bus_message_new_method_return(message, &reply);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_open_container(reply, 'a', "(sussussbto)");
+        if (r < 0)
+                return r;
+
+        Session *s;
+        HASHMAP_FOREACH(s, m->sessions) {
+                _cleanup_free_ char *path = NULL;
+                dual_timestamp idle_ts;
+                bool idle;
+
+                assert(s->user);
+
+                path = session_bus_path(s);
+                if (!path)
+                        return -ENOMEM;
+
+                r = session_get_idle_hint(s, &idle_ts);
+                if (r < 0)
+                        return r;
+                idle = r > 0;
+
+                r = sd_bus_message_append(reply, "(sussussbto)",
+                                          s->id,
+                                          (uint32_t) s->user->user_record->uid,
+                                          s->user->user_record->user_name,
+                                          s->seat ? s->seat->id : "",
+                                          (uint32_t) s->leader.pid,
+                                          session_class_to_string(s->class),
+                                          s->tty,
+                                          idle,
+                                          idle_ts.monotonic,
+                                          path);
                 if (r < 0)
                         return r;
         }
@@ -1748,6 +1802,7 @@ static int execute_shutdown_or_sleep(
         int r;
 
         assert(m);
+        assert(!m->action_job);
         assert(a);
 
         if (a->inhibit_what == INHIBIT_SHUTDOWN)
@@ -1767,9 +1822,11 @@ static int execute_shutdown_or_sleep(
         if (r < 0)
                 goto error;
 
-        r = free_and_strdup(&m->action_job, p);
-        if (r < 0)
+        m->action_job = strdup(p);
+        if (!m->action_job) {
+                r = -ENOMEM;
                 goto error;
+        }
 
         m->delayed_action = a;
 
@@ -2073,7 +2130,7 @@ static int method_do_shutdown_or_sleep(
         if (action == HANDLE_SLEEP) {
                 HandleAction selected;
 
-                selected = handle_action_sleep_select(m->handle_action_sleep_mask);
+                selected = handle_action_sleep_select(m);
                 if (selected < 0)
                         return sd_bus_error_set(error, BUS_ERROR_SLEEP_VERB_NOT_SUPPORTED,
                                                 "None of the configured sleep operations are supported");
@@ -2124,6 +2181,12 @@ static int method_do_shutdown_or_sleep(
         r = verify_shutdown_creds(m, message, a, flags, error);
         if (r != 0)
                 return r;
+
+        if (m->delayed_action)
+                return sd_bus_error_setf(error, BUS_ERROR_OPERATION_IN_PROGRESS,
+                                         "Action %s already in progress, refusing requested %s operation.",
+                                         handle_action_to_string(m->delayed_action->handle),
+                                         handle_action_to_string(a->handle));
 
         /* reset case we're shorting a scheduled shutdown */
         m->unlink_nologin = false;
@@ -2401,8 +2464,9 @@ static int manager_scheduled_shutdown_handler(
 
         /* Don't allow multiple jobs being executed at the same time */
         if (m->delayed_action) {
-                r = -EALREADY;
-                log_error("Scheduled shutdown to %s failed: shutdown or sleep operation already in progress", a->target);
+                r = log_error_errno(SYNTHETIC_ERRNO(EALREADY),
+                                    "Scheduled shutdown to %s failed: shutdown or sleep operation already in progress.",
+                                    a->target);
                 goto error;
         }
 
@@ -2573,7 +2637,7 @@ static int method_can_shutdown_or_sleep(
                 sd_bus_error *error) {
 
         _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
-        bool multiple_sessions, challenge, blocked;
+        bool multiple_sessions, challenge, blocked, check_unit_state = true;
         const HandleActionData *a;
         const char *result = NULL;
         uid_t uid;
@@ -2586,9 +2650,11 @@ static int method_can_shutdown_or_sleep(
         if (action == HANDLE_SLEEP) {
                 HandleAction selected;
 
-                selected = handle_action_sleep_select(m->handle_action_sleep_mask);
+                selected = handle_action_sleep_select(m);
                 if (selected < 0)
                         return sd_bus_reply_method_return(message, "s", "na");
+
+                check_unit_state = false; /* Already handled by handle_action_sleep_select */
 
                 assert_se(a = handle_action_lookup(selected));
 
@@ -2623,7 +2689,7 @@ static int method_can_shutdown_or_sleep(
         multiple_sessions = r > 0;
         blocked = manager_is_inhibited(m, a->inhibit_what, INHIBIT_BLOCK, NULL, false, true, uid, NULL);
 
-        if (a->target) {
+        if (check_unit_state && a->target) {
                 _cleanup_free_ char *load_state = NULL;
 
                 r = unit_load_state(m->bus, a->target, &load_state);
@@ -3625,6 +3691,11 @@ static const sd_bus_vtable manager_vtable[] = {
                                 SD_BUS_NO_ARGS,
                                 SD_BUS_RESULT("a(susso)", sessions),
                                 method_list_sessions,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("ListSessionsEx",
+                                SD_BUS_NO_ARGS,
+                                SD_BUS_RESULT("a(sussussbto)", sessions),
+                                method_list_sessions_ex,
                                 SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD_WITH_ARGS("ListUsers",
                                 SD_BUS_NO_ARGS,

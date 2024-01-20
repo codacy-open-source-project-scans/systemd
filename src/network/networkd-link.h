@@ -25,6 +25,7 @@
 #include "networkd-ipv6ll.h"
 #include "networkd-util.h"
 #include "ordered-set.h"
+#include "ratelimit.h"
 #include "resolve-util.h"
 #include "set.h"
 
@@ -106,6 +107,7 @@ typedef struct Link {
         LinkAddressState ipv4_address_state;
         LinkAddressState ipv6_address_state;
         LinkOnlineState online_state;
+        RateLimit automatic_reconfigure_ratelimit;
 
         unsigned static_address_messages;
         unsigned static_address_label_messages;
@@ -257,3 +259,5 @@ int manager_rtnl_process_link(sd_netlink *rtnl, sd_netlink_message *message, Man
 
 int link_flags_to_string_alloc(uint32_t flags, char **ret);
 const char *kernel_operstate_to_string(int t) _const_;
+
+void link_required_operstate_for_online(Link *link, LinkOperationalStateRange *ret);

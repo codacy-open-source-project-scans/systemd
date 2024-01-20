@@ -12,6 +12,7 @@ import itertools
 import json
 import os
 import pathlib
+import random
 import re
 import shutil
 import signal
@@ -195,6 +196,14 @@ def expectedFailureIfRoutingPolicyUIDRangeIsNotAvailable():
             supported = ret.returncode == 0 and 'uidrange 200-300' in ret.stdout
             call_quiet('ip rule del from 192.168.100.19 table 7 uidrange 200-300')
         return func if supported else unittest.expectedFailure(func)
+
+    return f
+
+def expectedFailureIfRoutingPolicyL3MasterDeviceIsNotAvailable():
+    def f(func):
+        rc = call_quiet('ip rule add not from 192.168.100.19 l3mdev')
+        call_quiet('ip rule del not from 192.168.100.19 l3mdev')
+        return func if rc == 0 else unittest.expectedFailure(func)
 
     return f
 
@@ -1771,6 +1780,8 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         start_networkd()
 
         self.wait_online(['vcan99:carrier', 'vcan98:carrier'])
+        # For can devices, 'carrier' is the default required operational state.
+        self.wait_online(['vcan99', 'vcan98'])
 
         # https://github.com/systemd/systemd/issues/30140
         output = check_output('ip -d link show vcan99')
@@ -1787,6 +1798,8 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         start_networkd()
 
         self.wait_online(['vxcan99:carrier', 'vxcan-peer:carrier'])
+        # For can devices, 'carrier' is the default required operational state.
+        self.wait_online(['vxcan99', 'vxcan-peer'])
 
     @expectedFailureIfModuleIsNotAvailable('wireguard')
     def test_wireguard(self):
@@ -1823,7 +1836,7 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
 
         output = check_output('ip -4 route show dev wg99 table 1234')
         print(output)
-        self.assertIn('192.168.26.0/24 proto static metric 123', output)
+        self.assertIn('192.168.26.0/24 proto static scope link metric 123', output)
 
         output = check_output('ip -6 route show dev wg99 table 1234')
         print(output)
@@ -3101,6 +3114,17 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         self.assertRegex(output, 'tcp')
         self.assertRegex(output, 'lookup 7')
 
+    @expectedFailureIfRoutingPolicyL3MasterDeviceIsNotAvailable()
+    def test_routing_policy_rule_l3mdev(self):
+        copy_network_unit('25-fibrule-l3mdev.network', '11-dummy.netdev')
+        start_networkd()
+        self.wait_online(['test1:degraded'])
+
+        output = check_output('ip rule')
+        print(output)
+        self.assertIn('1500:	from all lookup [l3mdev-table]', output)
+        self.assertIn('2000:	from all lookup [l3mdev-table] unreachable', output)
+
     @expectedFailureIfRoutingPolicyUIDRangeIsNotAvailable()
     def test_routing_policy_rule_uidrange(self):
         copy_network_unit('25-fibrule-uidrange.network', '11-dummy.netdev')
@@ -4031,6 +4055,33 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         networkctl_reload()               # reconfigured with 25-nexthop-dummy-1.network
 
         self.check_nexthop(manage_foreign_nexthops, first=True)
+
+        # Remove nexthop with ID 20
+        check_output('ip nexthop del id 20')
+        copy_network_unit('11-dummy.netdev', '25-nexthop-test1.network')
+        networkctl_reload()
+
+        # 25-nexthop-test1.network requests a route with nexthop ID 21,
+        # which is silently removed by the kernel when nexthop with ID 20 is removed in the above,
+        # hence test1 should be stuck in the configuring state.
+        self.wait_operstate('test1', operstate='routable', setup_state='configuring')
+
+        # Wait for a while, and check if the interface is still in the configuring state.
+        time.sleep(1)
+        output = networkctl_status('test1')
+        self.assertIn('State: routable (configuring)', output)
+
+        # Reconfigure the interface that has nexthop with ID 20 and 21,
+        # then the route requested by test1 can be configured.
+        networkctl_reconfigure('dummy98')
+        self.wait_online(['test1:routable'])
+
+        # Check if the requested route actually configured.
+        output = check_output('ip route show 10.10.11.10')
+        print(output)
+        self.assertIn('10.10.11.10 nhid 21 proto static', output)
+        self.assertIn('nexthop via 192.168.5.1 dev veth99 weight 3', output)
+        self.assertIn('nexthop via 192.168.20.1 dev dummy98 weight 1', output)
 
         remove_link('veth99')
         time.sleep(2)
@@ -5109,9 +5160,7 @@ class NetworkdRATests(unittest.TestCase, Utilities):
 
         self.teardown_nftset('addr6', 'network6', 'ifindex')
 
-    def test_ipv6_token_static(self):
-        copy_network_unit('25-veth.netdev', '25-ipv6-prefix.network', '25-ipv6-prefix-veth-token-static.network')
-        start_networkd()
+    def check_ipv6_token_static(self):
         self.wait_online(['veth99:routable', 'veth-peer:degraded'])
 
         output = networkctl_status('veth99')
@@ -5120,6 +5169,26 @@ class NetworkdRATests(unittest.TestCase, Utilities):
         self.assertRegex(output, '2002:da8:1:0:fa:de:ca:fe')
         self.assertRegex(output, '2002:da8:2:0:1a:2b:3c:4d')
         self.assertRegex(output, '2002:da8:2:0:fa:de:ca:fe')
+
+    def test_ipv6_token_static(self):
+        copy_network_unit('25-veth.netdev', '25-ipv6-prefix.network', '25-ipv6-prefix-veth-token-static.network')
+        start_networkd()
+
+        self.check_ipv6_token_static()
+
+        for _ in range(20):
+            check_output('ip link set veth99 down')
+            check_output('ip link set veth99 up')
+
+        self.check_ipv6_token_static()
+
+        for _ in range(20):
+            check_output('ip link set veth99 down')
+            time.sleep(random.uniform(0, 0.1))
+            check_output('ip link set veth99 up')
+            time.sleep(random.uniform(0, 0.1))
+
+        self.check_ipv6_token_static()
 
     def test_ipv6_token_prefixstable(self):
         copy_network_unit('25-veth.netdev', '25-ipv6-prefix.network', '25-ipv6-prefix-veth-token-prefixstable.network')
@@ -5360,6 +5429,24 @@ class NetworkdDHCPServerRelayAgentTests(unittest.TestCase, Utilities):
         output = networkctl_status('client')
         print(output)
         self.assertRegex(output, r'Address: 192.168.5.150 \(DHCP4 via 192.168.5.1\)')
+
+    def test_replay_agent_on_bridge(self):
+        copy_network_unit('25-agent-bridge.netdev',
+                          '25-agent-veth-client.netdev',
+                          '25-agent-bridge.network',
+                          '25-agent-bridge-port.network',
+                          '25-agent-client.network')
+        start_networkd()
+        self.wait_online(['bridge-relay:routable', 'client-peer:enslaved'])
+
+        # For issue #30763.
+        expect = 'bridge-relay: DHCPv4 server: STARTED'
+        for _ in range(20):
+            if expect in read_networkd_log():
+                break
+            time.sleep(0.5)
+        else:
+            self.fail()
 
 class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
 

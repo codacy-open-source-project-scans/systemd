@@ -139,7 +139,7 @@ static int ndisc_route_handler(sd_netlink *rtnl, sd_netlink_message *m, Request 
 
         assert(link);
 
-        r = route_configure_handler_internal(rtnl, m, link, "Could not set NDisc route");
+        r = route_configure_handler_internal(rtnl, m, link, route, "Could not set NDisc route");
         if (r <= 0)
                 return r;
 
@@ -172,8 +172,7 @@ static void ndisc_set_route_priority(Link *link, Route *route) {
         }
 }
 
-static int ndisc_request_route(Route *in, Link *link, sd_ndisc_router *rt) {
-        _cleanup_(route_freep) Route *route = in;
+static int ndisc_request_route(Route *route, Link *link, sd_ndisc_router *rt) {
         struct in6_addr router;
         uint8_t hop_limit = 0;
         uint32_t mtu = 0;
@@ -218,10 +217,13 @@ static int ndisc_request_route(Route *in, Link *link, sd_ndisc_router *rt) {
         if (r < 0)
                 return r;
 
+        r = route_adjust_nexthops(route, link);
+        if (r < 0)
+                return r;
+
         is_new = route_get(NULL, link, route, NULL) < 0;
 
-        r = link_request_route(link, TAKE_PTR(route), true, &link->ndisc_messages,
-                               ndisc_route_handler, NULL);
+        r = link_request_route(link, route, &link->ndisc_messages, ndisc_route_handler);
         if (r < 0)
                 return r;
         if (r > 0 && is_new)
@@ -321,11 +323,11 @@ static int ndisc_router_process_default(Link *link, sd_ndisc_router *rt) {
 
                 route->family = AF_INET6;
                 route->pref = preference;
-                route->gw_family = AF_INET6;
-                route->gw.in6 = gateway;
+                route->nexthop.family = AF_INET6;
+                route->nexthop.gw.in6 = gateway;
                 route->lifetime_usec = lifetime_usec;
 
-                r = ndisc_request_route(TAKE_PTR(route), link, rt);
+                r = ndisc_request_route(route, link, rt);
                 if (r < 0)
                         return log_link_warning_errno(link, r, "Could not request default route: %m");
         }
@@ -337,19 +339,19 @@ static int ndisc_router_process_default(Link *link, sd_ndisc_router *rt) {
                 if (!route_gw->gateway_from_dhcp_or_ra)
                         continue;
 
-                if (route_gw->gw_family != AF_INET6)
+                if (route_gw->nexthop.family != AF_INET6)
                         continue;
 
-                r = route_dup(route_gw, &route);
+                r = route_dup(route_gw, NULL, &route);
                 if (r < 0)
                         return r;
 
-                route->gw.in6 = gateway;
+                route->nexthop.gw.in6 = gateway;
                 if (!route->pref_set)
                         route->pref = preference;
                 route->lifetime_usec = lifetime_usec;
 
-                r = ndisc_request_route(TAKE_PTR(route), link, rt);
+                r = ndisc_request_route(route, link, rt);
                 if (r < 0)
                         return log_link_warning_errno(link, r, "Could not request gateway: %m");
         }
@@ -358,8 +360,7 @@ static int ndisc_router_process_default(Link *link, sd_ndisc_router *rt) {
 }
 
 static int ndisc_router_process_icmp6_ratelimit(Link *link, sd_ndisc_router *rt) {
-        char buf[DECIMAL_STR_MAX(usec_t)];
-        usec_t icmp6_ratelimit;
+        usec_t icmp6_ratelimit, msec;
         int r;
 
         assert(link);
@@ -375,14 +376,17 @@ static int ndisc_router_process_icmp6_ratelimit(Link *link, sd_ndisc_router *rt)
                 return 0;
         }
 
+        /* We do not allow 0 here. */
         if (!timestamp_is_set(icmp6_ratelimit))
+                return 0;
+
+        msec = DIV_ROUND_UP(icmp6_ratelimit, USEC_PER_MSEC);
+        if (msec <= 0 || msec > INT_MAX)
                 return 0;
 
         /* Limit the maximal rates for sending ICMPv6 packets. 0 to disable any limiting, otherwise the
          * minimal space between responses in milliseconds. Default: 1000. */
-        xsprintf(buf, USEC_FMT, DIV_ROUND_UP(icmp6_ratelimit, USEC_PER_MSEC));
-
-        r = sysctl_write_ip_property(AF_INET6, NULL, "icmp/ratelimit", buf);
+        r = sysctl_write_ip_property_int(AF_INET6, NULL, "icmp/ratelimit", (int) msec);
         if (r < 0)
                 log_link_warning_errno(link, r, "Failed to apply ICMP6 ratelimit, ignoring: %m");
 
@@ -497,7 +501,7 @@ static int ndisc_router_process_onlink_prefix(Link *link, sd_ndisc_router *rt) {
         route->pref = preference;
         route->lifetime_usec = lifetime_usec;
 
-        r = ndisc_request_route(TAKE_PTR(route), link, rt);
+        r = ndisc_request_route(route, link, rt);
         if (r < 0)
                 return log_link_warning_errno(link, r, "Could not request prefix route: %m");
 
@@ -624,13 +628,13 @@ static int ndisc_router_process_route(Link *link, sd_ndisc_router *rt) {
 
         route->family = AF_INET6;
         route->pref = preference;
-        route->gw.in6 = gateway;
-        route->gw_family = AF_INET6;
+        route->nexthop.gw.in6 = gateway;
+        route->nexthop.family = AF_INET6;
         route->dst.in6 = dst;
         route->dst_prefixlen = prefixlen;
         route->lifetime_usec = lifetime_usec;
 
-        r = ndisc_request_route(TAKE_PTR(route), link, rt);
+        r = ndisc_request_route(route, link, rt);
         if (r < 0)
                 return log_link_warning_errno(link, r, "Could not request additional route: %m");
 

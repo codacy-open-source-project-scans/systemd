@@ -184,6 +184,7 @@ struct Varlink {
         bool allow_fd_passing_output:1;
 
         bool output_buffer_sensitive:1; /* whether to erase the output buffer after writing it to the socket */
+        bool input_sensitive:1; /* Whether incoming messages might be sensitive */
 
         int af; /* address family if socket; AF_UNSPEC if not socket; negative if not known */
 
@@ -703,7 +704,7 @@ static void varlink_clear(Varlink *v) {
 
         varlink_clear_current(v);
 
-        v->input_buffer = mfree(v->input_buffer);
+        v->input_buffer = v->input_sensitive ? erase_and_free(v->input_buffer) : mfree(v->input_buffer);
         v->output_buffer = v->output_buffer_sensitive ? erase_and_free(v->output_buffer) : mfree(v->output_buffer);
 
         v->input_control_buffer = mfree(v->input_control_buffer);
@@ -1022,7 +1023,8 @@ static int varlink_read(Varlink *v) {
 }
 
 static int varlink_parse_message(Varlink *v) {
-        const char *e, *begin;
+        const char *e;
+        char *begin;
         size_t sz;
         int r;
 
@@ -1047,11 +1049,31 @@ static int varlink_parse_message(Varlink *v) {
         sz = e - begin + 1;
 
         r = json_parse(begin, 0, &v->current, NULL, NULL);
+        if (v->input_sensitive)
+                explicit_bzero_safe(begin, sz);
         if (r < 0) {
                 /* If we encounter a parse failure flush all data. We cannot possibly recover from this,
                  * hence drop all buffered data now. */
                 v->input_buffer_index = v->input_buffer_size = v->input_buffer_unscanned = 0;
                 return varlink_log_errno(v, r, "Failed to parse JSON: %m");
+        }
+
+        if (v->input_sensitive) {
+                /* Mark the parameters subfield as sensitive right-away, if that's requested */
+                JsonVariant *parameters = json_variant_by_key(v->current, "parameters");
+                if (parameters)
+                        json_variant_sensitive(parameters);
+        }
+
+        if (DEBUG_LOGGING) {
+                _cleanup_(erase_and_freep) char *censored_text = NULL;
+
+                /* Suppress sensitive fields in the debug output */
+                r = json_variant_format(v->current, /* flags= */ JSON_FORMAT_CENSOR_SENSITIVE, &censored_text);
+                if (r < 0)
+                        return r;
+
+                varlink_log(v, "Received message: %s", censored_text);
         }
 
         v->input_buffer_size -= sz;
@@ -1849,56 +1871,60 @@ Varlink* varlink_flush_close_unref(Varlink *v) {
 
 static int varlink_format_json(Varlink *v, JsonVariant *m) {
         _cleanup_(erase_and_freep) char *text = NULL;
-        bool sensitive = false;
-        int r;
+        int sz, r;
 
         assert(v);
         assert(m);
 
-        r = json_variant_format(m, JSON_FORMAT_REFUSE_SENSITIVE, &text);
-        if (r == -EPERM) {
-                sensitive = true;
-                r = json_variant_format(m, /* flags= */ 0, &text);
-        }
-        if (r < 0)
-                return r;
-        assert(text[r] == '\0');
+        sz = json_variant_format(m, /* flags= */ 0, &text);
+        if (sz < 0)
+                return sz;
+        assert(text[sz] == '\0');
 
-        if (v->output_buffer_size + r + 1 > VARLINK_BUFFER_MAX)
+        if (v->output_buffer_size + sz + 1 > VARLINK_BUFFER_MAX)
                 return -ENOBUFS;
 
-        varlink_log(v, "Sending message: %s", sensitive ? "<sensitive data>" : text);
+        if (DEBUG_LOGGING) {
+                _cleanup_(erase_and_freep) char *censored_text = NULL;
+
+                /* Suppress sensitive fields in the debug output */
+                r = json_variant_format(m, /* flags= */ JSON_FORMAT_CENSOR_SENSITIVE, &censored_text);
+                if (r < 0)
+                        return r;
+
+                varlink_log(v, "Sending message: %s", censored_text);
+        }
 
         if (v->output_buffer_size == 0) {
 
                 free_and_replace(v->output_buffer, text);
 
-                v->output_buffer_size = r + 1;
+                v->output_buffer_size = sz + 1;
                 v->output_buffer_index = 0;
 
         } else if (v->output_buffer_index == 0) {
 
-                if (!GREEDY_REALLOC(v->output_buffer, v->output_buffer_size + r + 1))
+                if (!GREEDY_REALLOC(v->output_buffer, v->output_buffer_size + sz + 1))
                         return -ENOMEM;
 
-                memcpy(v->output_buffer + v->output_buffer_size, text, r + 1);
-                v->output_buffer_size += r + 1;
+                memcpy(v->output_buffer + v->output_buffer_size, text, sz + 1);
+                v->output_buffer_size += sz + 1;
         } else {
                 char *n;
-                const size_t new_size = v->output_buffer_size + r + 1;
+                const size_t new_size = v->output_buffer_size + sz + 1;
 
                 n = new(char, new_size);
                 if (!n)
                         return -ENOMEM;
 
-                memcpy(mempcpy(n, v->output_buffer + v->output_buffer_index, v->output_buffer_size), text, r + 1);
+                memcpy(mempcpy(n, v->output_buffer + v->output_buffer_index, v->output_buffer_size), text, sz + 1);
 
                 free_and_replace(v->output_buffer, n);
                 v->output_buffer_size = new_size;
                 v->output_buffer_index = 0;
         }
 
-        if (sensitive)
+        if (json_variant_is_sensitive_recursive(m))
                 v->output_buffer_sensitive = true; /* Propagate sensitive flag */
         else
                 text = mfree(text); /* No point in the erase_and_free() destructor declared above */
@@ -2127,7 +2153,7 @@ int varlink_observeb(Varlink *v, const char *method, ...) {
         return varlink_observe(v, method, parameters);
 }
 
-int varlink_call(
+int varlink_call_full(
                 Varlink *v,
                 const char *method,
                 JsonVariant *parameters,
@@ -2185,21 +2211,29 @@ int varlink_call(
 
         switch (v->state) {
 
-        case VARLINK_CALLED:
+        case VARLINK_CALLED: {
                 assert(v->current);
 
                 varlink_set_state(v, VARLINK_IDLE_CLIENT);
                 assert(v->n_pending == 1);
                 v->n_pending--;
 
+                JsonVariant *e = json_variant_by_key(v->current, "error"),
+                        *p = json_variant_by_key(v->current, "parameters");
+
+                /* If caller doesn't ask for the error string, then let's return an error code in case of failure */
+                if (!ret_error_id && e)
+                        return varlink_error_to_errno(json_variant_string(e), p);
+
                 if (ret_parameters)
-                        *ret_parameters = json_variant_by_key(v->current, "parameters");
+                        *ret_parameters = p;
                 if (ret_error_id)
-                        *ret_error_id = json_variant_string(json_variant_by_key(v->current, "error"));
+                        *ret_error_id = e ? json_variant_string(e) : NULL;
                 if (ret_flags)
                         *ret_flags = 0;
 
                 return 1;
+        }
 
         case VARLINK_PENDING_DISCONNECT:
         case VARLINK_DISCONNECTED:
@@ -2213,27 +2247,73 @@ int varlink_call(
         }
 }
 
-int varlink_callb(
+int varlink_callb_ap(
                 Varlink *v,
                 const char *method,
                 JsonVariant **ret_parameters,
                 const char **ret_error_id,
-                VarlinkReplyFlags *ret_flags, ...) {
+                VarlinkReplyFlags *ret_flags,
+                va_list ap) {
+
+        _cleanup_(json_variant_unrefp) JsonVariant *parameters = NULL;
+        int r;
+
+        assert_return(v, -EINVAL);
+        assert_return(method, -EINVAL);
+
+        r = json_buildv(&parameters, ap);
+        if (r < 0)
+                return varlink_log_errno(v, r, "Failed to build json message: %m");
+
+        return varlink_call_full(v, method, parameters, ret_parameters, ret_error_id, ret_flags);
+}
+
+int varlink_call_and_log(
+                Varlink *v,
+                const char *method,
+                JsonVariant *parameters,
+                JsonVariant **ret_parameters) {
+
+        JsonVariant *reply = NULL;
+        const char *error_id = NULL;
+        int r;
+
+        assert_return(v, -EINVAL);
+        assert_return(method, -EINVAL);
+
+        r = varlink_call(v, method, parameters, &reply, &error_id);
+        if (r < 0)
+                return log_error_errno(r, "Failed to issue %s() varlink call: %m", method);
+        if (error_id)
+                return log_error_errno(varlink_error_to_errno(error_id, reply),
+                                         "Failed to issue %s() varlink call: %s", method, error_id);
+
+        if (ret_parameters)
+                *ret_parameters = TAKE_PTR(reply);
+
+        return 0;
+}
+
+int varlink_callb_and_log(
+                Varlink *v,
+                const char *method,
+                JsonVariant **ret_parameters,
+                ...) {
 
         _cleanup_(json_variant_unrefp) JsonVariant *parameters = NULL;
         va_list ap;
         int r;
 
         assert_return(v, -EINVAL);
+        assert_return(method, -EINVAL);
 
-        va_start(ap, ret_flags);
+        va_start(ap, ret_parameters);
         r = json_buildv(&parameters, ap);
         va_end(ap);
-
         if (r < 0)
-                return varlink_log_errno(v, r, "Failed to build json message: %m");
+                return log_error_errno(r, "Failed to build JSON message: %m");
 
-        return varlink_call(v, method, parameters, ret_parameters, ret_error_id, ret_flags);
+        return varlink_call_and_log(v, method, parameters, ret_parameters);
 }
 
 static void varlink_collect_context_free(VarlinkCollectContext *cc) {
@@ -2259,6 +2339,10 @@ static int collect_callback(
         /* If we hit an error, we will drop all collected replies and just return the error_id and flags in varlink_collect() */
         if (error_id) {
                 context->error_id = error_id;
+
+                json_variant_unref(context->parameters);
+                context->parameters = json_variant_ref(parameters);
+
                 return 0;
         }
 
@@ -2311,6 +2395,13 @@ int varlink_collect(
 
                 /* If we get an error from any of the replies, return immediately with just the error_id and flags*/
                 if (context.error_id) {
+
+                        /* If caller doesn't ask for the error string, then let's return an error code in case of failure */
+                        if (!ret_error_id)
+                                return varlink_error_to_errno(context.error_id, context.parameters);
+
+                        if (ret_parameters)
+                                *ret_parameters = TAKE_PTR(context.parameters);
                         if (ret_error_id)
                                 *ret_error_id = TAKE_PTR(context.error_id);
                         if (ret_flags)
@@ -2341,6 +2432,9 @@ int varlink_collect(
         default:
                 assert_not_reached();
         }
+
+        if (!ret_error_id && context.error_id)
+                return varlink_error_to_errno(context.error_id, context.parameters);
 
         if (ret_parameters)
                 *ret_parameters = TAKE_PTR(context.parameters);
@@ -3097,6 +3191,13 @@ int varlink_set_allow_fd_passing_output(Varlink *v, bool b) {
         return 0;
 }
 
+int varlink_set_input_sensitive(Varlink *v) {
+        assert_return(v, -EINVAL);
+
+        v->input_sensitive = true;
+        return 0;
+}
+
 int varlink_server_new(VarlinkServer **ret, VarlinkServerFlags flags) {
         _cleanup_(varlink_server_unrefp) VarlinkServer *s = NULL;
         int r;
@@ -3325,6 +3426,9 @@ static int connect_callback(sd_event_source *source, int fd, uint32_t revents, v
 
         TAKE_FD(cfd);
 
+        if (FLAGS_SET(ss->server->flags, VARLINK_SERVER_INPUT_SENSITIVE))
+                varlink_set_input_sensitive(v);
+
         if (ss->server->connect_callback) {
                 r = ss->server->connect_callback(ss->server, v, ss->server->userdata);
                 if (r < 0) {
@@ -3475,6 +3579,14 @@ int varlink_server_listen_auto(VarlinkServer *s) {
                         return r;
 
                 n++;
+        }
+
+        /* For debug purposes let's listen on an explicitly specified address */
+        const char *e = secure_getenv("SYSTEMD_VARLINK_LISTEN");
+        if (e) {
+                r = varlink_server_listen_address(s, e, FLAGS_SET(s->flags, VARLINK_SERVER_ROOT_ONLY) ? 0600 : 0666);
+                if (r < 0)
+                        return r;
         }
 
         return n;
@@ -3922,6 +4034,10 @@ int varlink_invocation(VarlinkInvocationFlags flags) {
 
         /* Returns true if this is a "pure" varlink server invocation, i.e. with one fd passed. */
 
+        const char *e = secure_getenv("SYSTEMD_VARLINK_LISTEN"); /* Permit a manual override for testing purposes */
+        if (e)
+                return true;
+
         r = sd_listen_fds_with_names(/* unset_environment= */ false, &names);
         if (r < 0)
                 return r;
@@ -3948,4 +4064,43 @@ int varlink_invocation(VarlinkInvocationFlags flags) {
                 return -EISCONN;
 
         return true;
+}
+
+int varlink_error_to_errno(const char *error, JsonVariant *parameters) {
+        static const struct {
+                const char *error;
+                int value;
+        } table[] = {
+                { VARLINK_ERROR_DISCONNECTED,           -ECONNRESET    },
+                { VARLINK_ERROR_TIMEOUT,                -ETIMEDOUT     },
+                { VARLINK_ERROR_PROTOCOL,               -EPROTO        },
+                { VARLINK_ERROR_INTERFACE_NOT_FOUND,    -EADDRNOTAVAIL },
+                { VARLINK_ERROR_METHOD_NOT_FOUND,       -ENXIO         },
+                { VARLINK_ERROR_METHOD_NOT_IMPLEMENTED, -ENOTTY        },
+                { VARLINK_ERROR_INVALID_PARAMETER,      -EINVAL        },
+                { VARLINK_ERROR_PERMISSION_DENIED,      -EACCES        },
+                { VARLINK_ERROR_EXPECTED_MORE,          -EBADE         },
+        };
+
+        if (!error)
+                return 0;
+
+        FOREACH_ARRAY(t, table, ELEMENTSOF(table))
+                if (streq(error, t->error))
+                        return t->value;
+
+        if (streq(error, VARLINK_ERROR_SYSTEM) && parameters) {
+                JsonVariant *e;
+
+                e = json_variant_by_key(parameters, "errno");
+                if (json_variant_is_integer(e)) {
+                        int64_t i;
+
+                        i = json_variant_integer(e);
+                        if (i > 0 && i < ERRNO_MAX)
+                                return -i;
+                }
+        }
+
+        return -EBADR; /* Catch-all */
 }

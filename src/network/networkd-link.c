@@ -71,6 +71,21 @@
 #include "udev-util.h"
 #include "vrf.h"
 
+void link_required_operstate_for_online(Link *link, LinkOperationalStateRange *ret) {
+        assert(link);
+        assert(ret);
+
+        if (link->network && operational_state_range_is_valid(&link->network->required_operstate_for_online))
+                *ret = link->network->required_operstate_for_online;
+        else if (link->iftype == ARPHRD_CAN)
+                *ret = (const LinkOperationalStateRange) {
+                        .min = LINK_OPERSTATE_CARRIER,
+                        .max = LINK_OPERSTATE_CARRIER,
+                };
+        else
+                *ret = LINK_OPERSTATE_RANGE_DEFAULT;
+}
+
 bool link_ipv6_enabled(Link *link) {
         assert(link);
 
@@ -381,6 +396,8 @@ int link_stop_engines(Link *link, bool may_keep_dhcp) {
 }
 
 void link_enter_failed(Link *link) {
+        int r;
+
         assert(link);
 
         if (IN_SET(link->state, LINK_STATE_FAILED, LINK_STATE_LINGER))
@@ -390,7 +407,22 @@ void link_enter_failed(Link *link) {
 
         link_set_state(link, LINK_STATE_FAILED);
 
-        (void) link_stop_engines(link, false);
+        if (!ratelimit_below(&link->automatic_reconfigure_ratelimit)) {
+                log_link_warning(link, "The interface entered the failed state frequently, refusing to reconfigure it automatically.");
+                goto stop;
+        }
+
+        log_link_info(link, "Trying to reconfigure the interface.");
+        r = link_reconfigure(link, /* force = */ true);
+        if (r < 0) {
+                log_link_warning_errno(link, r, "Failed to reconfigure interface: %m");
+                goto stop;
+        }
+
+        return;
+
+stop:
+        (void) link_stop_engines(link, /* may_keep_dhcp = */ false);
 }
 
 void link_check_ready(Link *link) {
@@ -416,11 +448,9 @@ void link_check_ready(Link *link) {
         if (!link->activated)
                 return (void) log_link_debug(link, "%s(): link is not activated.", __func__);
 
-        if (link->iftype == ARPHRD_CAN) {
+        if (link->iftype == ARPHRD_CAN)
                 /* let's shortcut things for CAN which doesn't need most of checks below. */
-                link_set_state(link, LINK_STATE_CONFIGURED);
-                return;
-        }
+                goto ready;
 
         if (!link->stacked_netdevs_created)
                 return (void) log_link_debug(link, "%s(): stacked netdevs are not created.", __func__);
@@ -972,7 +1002,7 @@ static int link_drop_requests(Link *link) {
                                 ;
                         }
 
-                request_detach(link->manager, req);
+                request_detach(req);
         }
 
         return ret;
@@ -1830,12 +1860,16 @@ void link_update_operstate(Link *link, bool also_update_master) {
         else
                 operstate = LINK_OPERSTATE_ENSLAVED;
 
+        LinkOperationalStateRange req;
+        link_required_operstate_for_online(link, &req);
+
         /* Only determine online state for managed links with RequiredForOnline=yes */
         if (!link->network || !link->network->required_for_online)
                 online_state = _LINK_ONLINE_STATE_INVALID;
-        else if (operstate < link->network->required_operstate_for_online.min ||
-                 operstate > link->network->required_operstate_for_online.max)
+
+        else if (!operational_state_is_in_range(operstate, &req))
                 online_state = LINK_ONLINE_STATE_OFFLINE;
+
         else {
                 AddressFamily required_family = link->network->required_family_for_online;
                 bool needs_ipv4 = required_family & ADDRESS_FAMILY_IPV4;
@@ -1846,14 +1880,14 @@ void link_update_operstate(Link *link, bool also_update_master) {
                  * to offline in the blocks below. */
                 online_state = LINK_ONLINE_STATE_ONLINE;
 
-                if (link->network->required_operstate_for_online.min >= LINK_OPERSTATE_DEGRADED) {
+                if (req.min >= LINK_OPERSTATE_DEGRADED) {
                         if (needs_ipv4 && ipv4_address_state < LINK_ADDRESS_STATE_DEGRADED)
                                 online_state = LINK_ONLINE_STATE_OFFLINE;
                         if (needs_ipv6 && ipv6_address_state < LINK_ADDRESS_STATE_DEGRADED)
                                 online_state = LINK_ONLINE_STATE_OFFLINE;
                 }
 
-                if (link->network->required_operstate_for_online.min >= LINK_OPERSTATE_ROUTABLE) {
+                if (req.min >= LINK_OPERSTATE_ROUTABLE) {
                         if (needs_ipv4 && ipv4_address_state < LINK_ADDRESS_STATE_ROUTABLE)
                                 online_state = LINK_ONLINE_STATE_OFFLINE;
                         if (needs_ipv6 && ipv6_address_state < LINK_ADDRESS_STATE_ROUTABLE)
@@ -2554,6 +2588,7 @@ static int link_new(Manager *manager, sd_netlink_message *message, Link **ret) {
                 .n_ref = 1,
                 .state = LINK_STATE_PENDING,
                 .online_state = _LINK_ONLINE_STATE_INVALID,
+                .automatic_reconfigure_ratelimit = (const RateLimit) { .interval = 10 * USEC_PER_SEC, .burst = 5 },
                 .ifindex = ifindex,
                 .iftype = iftype,
                 .ifname = TAKE_PTR(ifname),

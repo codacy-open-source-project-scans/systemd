@@ -42,7 +42,7 @@ static char *arg_qemu_smp = NULL;
 static uint64_t arg_qemu_mem = 2ULL * 1024ULL * 1024ULL * 1024ULL;
 static int arg_qemu_kvm = -1;
 static int arg_qemu_vsock = -1;
-static uint64_t arg_vsock_cid = UINT64_MAX;
+static unsigned arg_vsock_cid = VMADDR_CID_ANY;
 static bool arg_qemu_gui = false;
 static int arg_secure_boot = -1;
 static MachineCredentialContext arg_credentials = {};
@@ -69,11 +69,11 @@ static int help(void) {
                "%5$sSpawn a command or OS in a virtual machine.%6$s\n\n"
                "  -h --help                 Show this help\n"
                "     --version              Print version string\n"
-               "     --no-pager             Do not pipe output into a pager\n\n"
-               "%3$sImage:%4$s\n"
+               "     --no-pager             Do not pipe output into a pager\n"
+               "\n%3$sImage:%4$s\n"
                "  -i --image=PATH           Root file system disk image (or device node) for\n"
-               "                            the virtual machine\n\n"
-               "%3$sHost Configuration:%4$s\n"
+               "                            the virtual machine\n"
+               "\n%3$sHost Configuration:%4$s\n"
                "     --qemu-smp=SMP         Configure guest's SMP settings\n"
                "     --qemu-mem=MEM         Configure guest's RAM size\n"
                "     --qemu-kvm=BOOL        Configure whether to use KVM or not\n"
@@ -81,10 +81,10 @@ static int help(void) {
                "     --vsock-cid=           Specify the CID to use for the qemu guest's vsock\n"
                "     --qemu-gui             Start QEMU in graphical mode\n"
                "     --secure-boot=BOOL     Configure whether to search for firmware which\n"
-               "                            supports Secure Boot\n\n"
-               "%3$sSystem Identity:%4$s\n"
+               "                            supports Secure Boot\n"
+               "\n%3$sSystem Identity:%4$s\n"
                "  -M --machine=NAME         Set the machine name for the container\n"
-               "%3$sCredentials:%4$s\n"
+               "\n%3$sCredentials:%4$s\n"
                "     --set-credential=ID:VALUE\n"
                "                            Pass a credential with literal value to container.\n"
                "     --load-credential=ID:PATH\n"
@@ -198,20 +198,21 @@ static int parse_argv(int argc, char *argv[]) {
                                 return log_error_errno(r, "Failed to parse --qemu-vsock=%s: %m", optarg);
                         break;
 
-                case ARG_VSOCK_CID: {
-                        unsigned cid;
+                case ARG_VSOCK_CID:
                         if (isempty(optarg))
-                                cid = VMADDR_CID_ANY;
+                                arg_vsock_cid = VMADDR_CID_ANY;
                         else {
-                                r = safe_atou_bounded(optarg, 3, UINT_MAX - 1, &cid);
-                                if (r == -ERANGE)
-                                        return log_error_errno(r, "Invalid value for --vsock-cid=: %m");
+                                unsigned cid;
+
+                                r = vsock_parse_cid(optarg, &cid);
                                 if (r < 0)
-                                        return log_error_errno(r, "Failed to parse --vsock-cid=%s: %m", optarg);
+                                        return log_error_errno(r, "Failed to parse --vsock-cid: %s", optarg);
+                                if (!VSOCK_CID_IS_REGULAR(cid))
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Specified CID is not regular, refusing: %u", cid);
+
+                                arg_vsock_cid = cid;
                         }
-                        arg_vsock_cid = (uint64_t)cid;
                         break;
-                }
 
                 case ARG_QEMU_GUI:
                         arg_qemu_gui = true;
@@ -499,8 +500,7 @@ static int run_virtual_machine(void) {
         unsigned child_cid = VMADDR_CID_ANY;
         _cleanup_close_ int child_vsock_fd = -EBADF;
         if (use_vsock) {
-                if (arg_vsock_cid < UINT_MAX)
-                        child_cid = (unsigned)arg_vsock_cid;
+                child_cid = arg_vsock_cid;
 
                 r = vsock_fix_child_cid(&child_cid, arg_machine, &child_vsock_fd);
                 if (r < 0)
@@ -516,25 +516,25 @@ static int run_virtual_machine(void) {
                         return log_oom();
         }
 
-        r = strv_extend_strv(&cmdline, STRV_MAKE("-cpu", "max"), /* filter_duplicates= */ false);
+        r = strv_extend_many(&cmdline, "-cpu", "max");
         if (r < 0)
                 return log_oom();
 
-        if (arg_qemu_gui) {
-                r = strv_extend_strv(&cmdline, STRV_MAKE("-vga", "virtio"),  /* filter_duplicates= */ false);
-                if (r < 0)
-                        return log_oom();
-        } else {
-                r = strv_extend_strv(&cmdline, STRV_MAKE(
-                        "-nographic",
-                        "-nodefaults",
-                        "-chardev", "stdio,mux=on,id=console,signal=off",
-                        "-serial", "chardev:console",
-                        "-mon", "console"
-                ),  /* filter_duplicates= */ false);
-                if (r < 0)
-                        return log_oom();
-        }
+        if (arg_qemu_gui)
+                r = strv_extend_many(
+                                &cmdline,
+                                "-vga",
+                                "virtio");
+        else
+                r = strv_extend_many(
+                                &cmdline,
+                                "-nographic",
+                                "-nodefaults",
+                                "-chardev", "stdio,mux=on,id=console,signal=off",
+                                "-serial", "chardev:console",
+                                "-mon", "console");
+        if (r < 0)
+                return log_oom();
 
         if (ARCHITECTURE_SUPPORTS_SMBIOS)
                 FOREACH_ARRAY(cred, arg_credentials.credentials, arg_credentials.n_credentials) {
@@ -588,11 +588,11 @@ static int run_virtual_machine(void) {
                 (void) copy_access(source_fd, target_fd);
                 (void) copy_times(source_fd, target_fd, 0);
 
-                r = strv_extend_strv(&cmdline, STRV_MAKE(
-                        "-global", "ICH9-LPC.disable_s3=1",
-                        "-global", "driver=cfi.pflash01,property=secure,value=on",
-                        "-drive"
-                ),  /* filter_duplicates= */ false);
+                r = strv_extend_many(
+                                &cmdline,
+                                "-global", "ICH9-LPC.disable_s3=1",
+                                "-global", "driver=cfi.pflash01,property=secure,value=on",
+                                "-drive");
                 if (r < 0)
                         return log_oom();
 
@@ -609,29 +609,31 @@ static int run_virtual_machine(void) {
         if (r < 0)
                 return log_oom();
 
-        r = strv_extend_strv(&cmdline, STRV_MAKE(
-                "-device", "virtio-scsi-pci,id=scsi",
-                "-device", "scsi-hd,drive=mkosi,bootindex=1"
-        ),  /* filter_duplicates= */ false);
+        r = strv_extend_many(
+                        &cmdline,
+                        "-device", "virtio-scsi-pci,id=scsi",
+                        "-device", "scsi-hd,drive=mkosi,bootindex=1");
         if (r < 0)
                 return log_oom();
 
-        if (!strv_isempty(arg_parameters)) {
-                if (ARCHITECTURE_SUPPORTS_SMBIOS) {
-                        _cleanup_free_ char *kcl = strv_join(arg_parameters, " ");
-                        if (!kcl)
-                                return log_oom();
+        r = strv_prepend(&arg_parameters, "console=" DEFAULT_SERIAL_TTY);
+        if (r < 0)
+                return log_oom();
 
-                        r = strv_extend(&cmdline, "-smbios");
-                        if (r < 0)
-                                return log_oom();
+        if (ARCHITECTURE_SUPPORTS_SMBIOS) {
+                _cleanup_free_ char *kcl = strv_join(arg_parameters, " ");
+                if (!kcl)
+                        return log_oom();
 
-                        r = strv_extendf(&cmdline, "type=11,value=io.systemd.stub.kernel-cmdline-extra=%s", kcl);
-                        if (r < 0)
-                                return log_oom();
-                } else
-                        log_warning("Cannot append extra args to kernel cmdline, native architecture doesn't support SMBIOS");
-        }
+                r = strv_extend(&cmdline, "-smbios");
+                if (r < 0)
+                        return log_oom();
+
+                r = strv_extendf(&cmdline, "type=11,value=io.systemd.stub.kernel-cmdline-extra=%s", kcl);
+                if (r < 0)
+                        return log_oom();
+        } else
+                log_warning("Cannot append extra args to kernel cmdline, native architecture doesn't support SMBIOS");
 
         if (use_vsock) {
                 vsock_fd = open_vsock();
@@ -643,6 +645,14 @@ static int run_virtual_machine(void) {
                         return log_oom();
                 if (r < 0)
                         return log_error_errno(r, "Failed to call getsockname on vsock: %m");
+        }
+
+        if (DEBUG_LOGGING) {
+                _cleanup_free_ char *joined = quote_command_line(cmdline, SHELL_ESCAPE_EMPTY);
+                if (!joined)
+                        return log_oom();
+
+                log_debug("Executing: %s", joined);
         }
 
         _cleanup_(sd_event_source_unrefp) sd_event_source *notify_event_source = NULL;
@@ -675,7 +685,6 @@ static int run_virtual_machine(void) {
                 _exit(EXIT_FAILURE);
         }
 
-
         int exit_status = INT_MAX;
         if (use_vsock) {
                 r = setup_notify_parent(event, vsock_fd, &exit_status, &notify_event_source);
@@ -684,10 +693,10 @@ static int run_virtual_machine(void) {
         }
 
         /* shutdown qemu when we are shutdown */
-        (void) sd_event_add_signal(event, NULL, SIGINT, on_orderly_shutdown, PID_TO_PTR(child_pid));
-        (void) sd_event_add_signal(event, NULL, SIGTERM, on_orderly_shutdown, PID_TO_PTR(child_pid));
+        (void) sd_event_add_signal(event, NULL, SIGINT | SD_EVENT_SIGNAL_PROCMASK, on_orderly_shutdown, PID_TO_PTR(child_pid));
+        (void) sd_event_add_signal(event, NULL, SIGTERM | SD_EVENT_SIGNAL_PROCMASK, on_orderly_shutdown, PID_TO_PTR(child_pid));
 
-        (void) sd_event_add_signal(event, NULL, SIGRTMIN+18, sigrtmin18_handler, NULL);
+        (void) sd_event_add_signal(event, NULL, (SIGRTMIN+18) | SD_EVENT_SIGNAL_PROCMASK, sigrtmin18_handler, NULL);
 
         /* Exit when the child exits */
         (void) sd_event_add_child(event, NULL, child_pid, WEXITED, on_child_exit, NULL);
@@ -713,7 +722,7 @@ static int determine_names(void) {
         int r;
 
         if (!arg_image)
-                return log_error_errno(SYNTHETIC_ERRNO(-EINVAL), "Missing required argument -i/--image=, quitting");
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Missing required argument -i/--image=, quitting");
 
         if (!arg_machine) {
                 char *e;
@@ -748,7 +757,7 @@ static int run(int argc, char *argv[]) {
         if (r < 0)
                 return r;
 
-        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGCHLD, SIGTERM, SIGINT, SIGRTMIN+18, -1) >= 0);
+        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGCHLD, -1) >= 0);
 
         return run_virtual_machine();
 }

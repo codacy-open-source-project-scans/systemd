@@ -38,6 +38,8 @@ char** strv_copy_n(char * const *l, size_t n);
 static inline char** strv_copy(char * const *l) {
         return strv_copy_n(l, SIZE_MAX);
 }
+int strv_copy_unless_empty(char * const *l, char ***ret);
+
 size_t strv_length(char * const *l) _pure_;
 
 int strv_extend_strv(char ***a, char * const *b, bool filter_duplicates);
@@ -53,8 +55,10 @@ static inline int strv_extend(char ***l, const char *value) {
         return strv_extend_with_size(l, NULL, value);
 }
 
+int strv_extend_many_internal(char ***l, const char *value, ...);
+#define strv_extend_many(l, ...) strv_extend_many_internal(l, __VA_ARGS__, POINTER_MAX)
+
 int strv_extendf(char ***l, const char *format, ...) _printf_(2,3);
-int strv_extend_front(char ***l, const char *value);
 
 int strv_push_with_size(char ***l, size_t *n, char *value);
 static inline int strv_push(char ***l, char *value) {

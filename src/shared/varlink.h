@@ -47,7 +47,8 @@ typedef enum VarlinkServerFlags {
         VARLINK_SERVER_MYSELF_ONLY      = 1 << 1, /* Only accessible by our own UID */
         VARLINK_SERVER_ACCOUNT_UID      = 1 << 2, /* Do per user accounting */
         VARLINK_SERVER_INHERIT_USERDATA = 1 << 3, /* Initialize Varlink connection userdata from VarlinkServer userdata */
-        _VARLINK_SERVER_FLAGS_ALL = (1 << 4) - 1,
+        VARLINK_SERVER_INPUT_SENSITIVE  = 1 << 4, /* Automatically mark al connection input as sensitive */
+        _VARLINK_SERVER_FLAGS_ALL = (1 << 5) - 1,
 } VarlinkServerFlags;
 
 typedef int (*VarlinkMethod)(Varlink *link, JsonVariant *parameters, VarlinkMethodFlags flags, void *userdata);
@@ -87,8 +88,32 @@ int varlink_send(Varlink *v, const char *method, JsonVariant *parameters);
 int varlink_sendb(Varlink *v, const char *method, ...);
 
 /* Send method call and wait for reply */
-int varlink_call(Varlink *v, const char *method, JsonVariant *parameters, JsonVariant **ret_parameters, const char **ret_error_id, VarlinkReplyFlags *ret_flags);
-int varlink_callb(Varlink *v, const char *method, JsonVariant **ret_parameters, const char **ret_error_id, VarlinkReplyFlags *ret_flags, ...);
+int varlink_call_full(Varlink *v, const char *method, JsonVariant *parameters, JsonVariant **ret_parameters, const char **ret_error_id, VarlinkReplyFlags *ret_flags);
+static inline int varlink_call(Varlink *v, const char *method, JsonVariant *parameters, JsonVariant **ret_parameters, const char **ret_error_id) {
+        return varlink_call_full(v, method, parameters, ret_parameters, ret_error_id, NULL);
+}
+int varlink_call_and_log(Varlink *v, const char *method, JsonVariant *parameters, JsonVariant **ret_parameters);
+
+int varlink_callb_ap(Varlink *v, const char *method, JsonVariant **ret_parameters, const char **ret_error_id, VarlinkReplyFlags *ret_flags, va_list ap);
+static inline int varlink_callb_full(Varlink *v, const char *method, JsonVariant **ret_parameters, const char **ret_error_id, VarlinkReplyFlags *ret_flags, ...) {
+        va_list ap;
+        int r;
+
+        va_start(ap, ret_flags);
+        r = varlink_callb_ap(v, method, ret_parameters, ret_error_id, ret_flags, ap);
+        va_end(ap);
+        return r;
+}
+static inline int varlink_callb(Varlink *v, const char *method, JsonVariant **ret_parameters, const char **ret_error_id, ...) {
+        va_list ap;
+        int r;
+
+        va_start(ap, ret_error_id);
+        r = varlink_callb_ap(v, method, ret_parameters, ret_error_id, NULL, ap);
+        va_end(ap);
+        return r;
+}
+int varlink_callb_and_log(Varlink *v, const char *method, JsonVariant **ret_parameters, ...);
 
 /* Send method call and begin collecting all 'more' replies into an array, finishing when a final reply is sent */
 int varlink_collect(Varlink *v, const char *method, JsonVariant *parameters, JsonVariant **ret_parameters, const char **ret_error_id, VarlinkReplyFlags *ret_flags);
@@ -154,6 +179,9 @@ VarlinkServer* varlink_get_server(Varlink *v);
 
 int varlink_set_description(Varlink *v, const char *d);
 
+/* Automatically mark the parameters part of incoming messages as security sensitive */
+int varlink_set_input_sensitive(Varlink *v);
+
 /* Create a varlink server */
 int varlink_server_new(VarlinkServer **ret, VarlinkServerFlags flags);
 VarlinkServer *varlink_server_ref(VarlinkServer *s);
@@ -208,6 +236,8 @@ typedef enum VarlinkInvocationFlags {
 } VarlinkInvocationFlags;
 
 int varlink_invocation(VarlinkInvocationFlags flags);
+
+int varlink_error_to_errno(const char *error, JsonVariant *parameters);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(Varlink *, varlink_unref);
 DEFINE_TRIVIAL_CLEANUP_FUNC(Varlink *, varlink_close_unref);
