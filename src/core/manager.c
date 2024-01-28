@@ -992,8 +992,8 @@ int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, 
                         return r;
 
 #if HAVE_LIBBPF
-                if (MANAGER_IS_SYSTEM(m) && lsm_bpf_supported(/* initialize = */ true)) {
-                        r = lsm_bpf_setup(m);
+                if (MANAGER_IS_SYSTEM(m) && bpf_restrict_fs_supported(/* initialize = */ true)) {
+                        r = bpf_restrict_fs_setup(m);
                         if (r < 0)
                                 log_warning_errno(r, "Failed to setup LSM BPF, ignoring: %m");
                 }
@@ -1016,9 +1016,9 @@ int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, 
 
                 m->executor_fd = open(SYSTEMD_EXECUTOR_BINARY_PATH, O_CLOEXEC|O_PATH);
                 if (m->executor_fd < 0)
-                        return log_warning_errno(errno,
-                                                 "Failed to open executor binary '%s': %m",
-                                                 SYSTEMD_EXECUTOR_BINARY_PATH);
+                        return log_emergency_errno(errno,
+                                                   "Failed to open executor binary '%s': %m",
+                                                   SYSTEMD_EXECUTOR_BINARY_PATH);
         } else if (!FLAGS_SET(test_run_flags, MANAGER_TEST_DONT_OPEN_EXECUTOR)) {
                 _cleanup_free_ char *self_exe = NULL, *executor_path = NULL;
                 _cleanup_close_ int self_dir_fd = -EBADF;
@@ -1710,7 +1710,7 @@ Manager* manager_free(Manager *m) {
         m->fw_ctx = fw_ctx_free(m->fw_ctx);
 
 #if BPF_FRAMEWORK
-        lsm_bpf_destroy(m->restrict_fs);
+        bpf_restrict_fs_destroy(m->restrict_fs);
 #endif
 
         safe_close(m->executor_fd);
@@ -2405,7 +2405,7 @@ void manager_clear_jobs(Manager *m) {
                 job_finish_and_invalidate(j, JOB_CANCELED, false, false);
 }
 
-void manager_unwatch_pidref(Manager *m, PidRef *pid) {
+void manager_unwatch_pidref(Manager *m, const PidRef *pid) {
         assert(m);
 
         for (;;) {

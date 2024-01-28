@@ -76,6 +76,20 @@ static int socket_dispatch_io(sd_event_source *source, int fd, uint32_t revents,
 static int socket_dispatch_timer(sd_event_source *source, usec_t usec, void *userdata);
 static void flush_ports(Socket *s);
 
+static bool SOCKET_STATE_WITH_PROCESS(SocketState state) {
+        return IN_SET(state,
+                      SOCKET_START_PRE,
+                      SOCKET_START_CHOWN,
+                      SOCKET_START_POST,
+                      SOCKET_STOP_PRE,
+                      SOCKET_STOP_PRE_SIGTERM,
+                      SOCKET_STOP_PRE_SIGKILL,
+                      SOCKET_STOP_POST,
+                      SOCKET_FINAL_SIGTERM,
+                      SOCKET_FINAL_SIGKILL,
+                      SOCKET_CLEANING);
+}
+
 static void socket_init(Unit *u) {
         Socket *s = SOCKET(u);
 
@@ -108,12 +122,7 @@ static void socket_init(Unit *u) {
 
 static void socket_unwatch_control_pid(Socket *s) {
         assert(s);
-
-        if (!pidref_is_set(&s->control_pid))
-                return;
-
-        unit_unwatch_pidref(UNIT(s), &s->control_pid);
-        pidref_done(&s->control_pid);
+        unit_unwatch_pidref_done(UNIT(s), &s->control_pid);
 }
 
 static void socket_cleanup_fd_list(SocketPort *p) {
@@ -1778,18 +1787,7 @@ static void socket_set_state(Socket *s, SocketState state) {
         old_state = s->state;
         s->state = state;
 
-        if (!IN_SET(state,
-                    SOCKET_START_PRE,
-                    SOCKET_START_CHOWN,
-                    SOCKET_START_POST,
-                    SOCKET_STOP_PRE,
-                    SOCKET_STOP_PRE_SIGTERM,
-                    SOCKET_STOP_PRE_SIGKILL,
-                    SOCKET_STOP_POST,
-                    SOCKET_FINAL_SIGTERM,
-                    SOCKET_FINAL_SIGKILL,
-                    SOCKET_CLEANING)) {
-
+        if (!SOCKET_STATE_WITH_PROCESS(state)) {
                 s->timer_event_source = sd_event_source_disable_unref(s->timer_event_source);
                 socket_unwatch_control_pid(s);
                 s->control_command = NULL;
@@ -1828,17 +1826,7 @@ static int socket_coldplug(Unit *u) {
 
         if (pidref_is_set(&s->control_pid) &&
             pidref_is_unwaited(&s->control_pid) > 0 &&
-            IN_SET(s->deserialized_state,
-                   SOCKET_START_PRE,
-                   SOCKET_START_CHOWN,
-                   SOCKET_START_POST,
-                   SOCKET_STOP_PRE,
-                   SOCKET_STOP_PRE_SIGTERM,
-                   SOCKET_STOP_PRE_SIGKILL,
-                   SOCKET_STOP_POST,
-                   SOCKET_FINAL_SIGTERM,
-                   SOCKET_FINAL_SIGKILL,
-                   SOCKET_CLEANING)) {
+            SOCKET_STATE_WITH_PROCESS(s->deserialized_state)) {
 
                 r = unit_watch_pidref(UNIT(s), &s->control_pid, /* exclusive= */ false);
                 if (r < 0)
@@ -2070,13 +2058,7 @@ static void socket_enter_signal(Socket *s, SocketState state, SocketResult f) {
         if (s->result == SOCKET_SUCCESS)
                 s->result = f;
 
-        r = unit_kill_context(
-                        UNIT(s),
-                        &s->kill_context,
-                        state_to_kill_operation(s, state),
-                        /* main_pid= */ NULL,
-                        &s->control_pid,
-                        /* main_pid_alien= */ false);
+        r = unit_kill_context(UNIT(s), state_to_kill_operation(s, state));
         if (r < 0) {
                 log_unit_warning_errno(UNIT(s), r, "Failed to kill processes: %m");
                 goto fail;

@@ -731,10 +731,10 @@ typedef struct UnitVTable {
         /* Returns the start timeout of a unit */
         usec_t (*get_timeout_start_usec)(Unit *u);
 
-        /* Returns the main PID if there is any defined, or 0. */
-        PidRef* (*main_pid)(Unit *u);
+        /* Returns the main PID if there is any defined, or NULL. */
+        PidRef* (*main_pid)(Unit *u, bool *ret_is_alien);
 
-        /* Returns the control PID if there is any defined, or 0. */
+        /* Returns the control PID if there is any defined, or NULL. */
         PidRef* (*control_pid)(Unit *u);
 
         /* Returns true if the unit currently needs access to the console */
@@ -925,17 +925,18 @@ int unit_start(Unit *u, ActivationDetails *details);
 int unit_stop(Unit *u);
 int unit_reload(Unit *u);
 
-int unit_kill(Unit *u, KillWho w, int signo, int code, int value, sd_bus_error *error);
+int unit_kill(Unit *u, KillWho w, int signo, int code, int value, sd_bus_error *ret_error);
 
 void unit_notify_cgroup_oom(Unit *u, bool managed_oom);
 
 void unit_notify(Unit *u, UnitActiveState os, UnitActiveState ns, bool reload_success);
 
-int unit_watch_pidref(Unit *u, PidRef *pid, bool exclusive);
+int unit_watch_pidref(Unit *u, const PidRef *pid, bool exclusive);
 int unit_watch_pid(Unit *u, pid_t pid, bool exclusive);
-void unit_unwatch_pidref(Unit *u, PidRef *pid);
+void unit_unwatch_pidref(Unit *u, const PidRef *pid);
 void unit_unwatch_pid(Unit *u, pid_t pid);
 void unit_unwatch_all_pids(Unit *u);
+void unit_unwatch_pidref_done(Unit *u, PidRef *pidref);
 
 int unit_enqueue_rewatch_pids(Unit *u);
 void unit_dequeue_rewatch_pids(Unit *u);
@@ -1006,7 +1007,7 @@ char* unit_concat_strv(char **l, UnitWriteFlags flags);
 int unit_write_setting(Unit *u, UnitWriteFlags flags, const char *name, const char *data);
 int unit_write_settingf(Unit *u, UnitWriteFlags mode, const char *name, const char *format, ...) _printf_(4,5);
 
-int unit_kill_context(Unit *u, KillContext *c, KillOperation k, PidRef *main_pid, PidRef *control_pid, bool main_pid_alien);
+int unit_kill_context(Unit *u, KillOperation k);
 
 int unit_make_transient(Unit *u);
 
@@ -1021,7 +1022,10 @@ bool unit_is_upheld_by_active(Unit *u, Unit **ret_culprit);
 bool unit_is_bound_by_inactive(Unit *u, Unit **ret_culprit);
 
 PidRef* unit_control_pid(Unit *u);
-PidRef* unit_main_pid(Unit *u);
+PidRef* unit_main_pid_full(Unit *u, bool *ret_is_alien);
+static inline PidRef* unit_main_pid(Unit *u) {
+        return unit_main_pid_full(u, NULL);
+}
 
 void unit_warn_if_dir_nonempty(Unit *u, const char* where);
 int unit_fail_if_noncanonical(Unit *u, const char* where);
@@ -1055,7 +1059,7 @@ int unit_warn_leftover_processes(Unit *u, cg_kill_log_func_t log_func);
 
 bool unit_needs_console(Unit *u);
 
-int unit_pid_attachable(Unit *unit, PidRef *pid, sd_bus_error *error);
+int unit_pid_attachable(Unit *unit, const PidRef *pid, sd_bus_error *error);
 
 static inline bool unit_has_job_type(Unit *u, JobType type) {
         return u && u->job && u->job->type == type;

@@ -181,6 +181,7 @@ static int ndisc_request_route(Route *route, Link *link, sd_ndisc_router *rt) {
 
         assert(route);
         assert(link);
+        assert(link->manager);
         assert(link->network);
         assert(rt);
 
@@ -221,7 +222,7 @@ static int ndisc_request_route(Route *route, Link *link, sd_ndisc_router *rt) {
         if (r < 0)
                 return r;
 
-        is_new = route_get(NULL, link, route, NULL) < 0;
+        is_new = route_get(link->manager, route, NULL) < 0;
 
         r = link_request_route(link, route, &link->ndisc_messages, ndisc_route_handler);
         if (r < 0)
@@ -315,7 +316,7 @@ static int ndisc_router_process_default(Link *link, sd_ndisc_router *rt) {
                 return log_link_warning_errno(link, r, "Failed to get default router preference from RA: %m");
 
         if (link->network->ipv6_accept_ra_use_gateway) {
-                _cleanup_(route_freep) Route *route = NULL;
+                _cleanup_(route_unrefp) Route *route = NULL;
 
                 r = route_new(&route);
                 if (r < 0)
@@ -334,7 +335,7 @@ static int ndisc_router_process_default(Link *link, sd_ndisc_router *rt) {
 
         Route *route_gw;
         HASHMAP_FOREACH(route_gw, link->network->routes_by_section) {
-                _cleanup_(route_freep) Route *route = NULL;
+                _cleanup_(route_unrefp) Route *route = NULL;
 
                 if (!route_gw->gateway_from_dhcp_or_ra)
                         continue;
@@ -389,6 +390,42 @@ static int ndisc_router_process_icmp6_ratelimit(Link *link, sd_ndisc_router *rt)
         r = sysctl_write_ip_property_int(AF_INET6, NULL, "icmp/ratelimit", (int) msec);
         if (r < 0)
                 log_link_warning_errno(link, r, "Failed to apply ICMP6 ratelimit, ignoring: %m");
+
+        return 0;
+}
+
+static int ndisc_router_process_retransmission_time(Link *link, sd_ndisc_router *rt) {
+        usec_t retrans_time, msec;
+        int r;
+
+        assert(link);
+        assert(link->network);
+        assert(rt);
+
+        if (!link->network->ipv6_accept_ra_use_retransmission_time)
+                return 0;
+
+        r = sd_ndisc_router_get_retransmission_time(rt, &retrans_time);
+        if (r < 0) {
+                log_link_debug_errno(link, r, "Failed to get retransmission time from RA, ignoring: %m");
+                return 0;
+        }
+
+        /* 0 is the unspecified value and must not be set (see RFC4861, 6.3.4) */
+        if (!timestamp_is_set(retrans_time))
+                return 0;
+
+        msec = DIV_ROUND_UP(retrans_time, USEC_PER_MSEC);
+        if (msec <= 0 || msec > UINT32_MAX) {
+                log_link_debug(link, "Failed to get retransmission time from RA - out of range (%"PRIu64"), ignoring", msec);
+                return 0;
+        }
+
+        /* Set the retransmission time for Neigbor Solicitations. */
+        r = sysctl_write_ip_neighbor_property_uint32(AF_INET6, link->ifname, "retrans_time_ms", (uint32_t) msec);
+        if (r < 0)
+                log_link_warning_errno(
+                        link, r, "Failed to apply neighbor retransmission time (%"PRIu64"), ignoring: %m", msec);
 
         return 0;
 }
@@ -461,7 +498,7 @@ static int ndisc_router_process_autonomous_prefix(Link *link, sd_ndisc_router *r
 }
 
 static int ndisc_router_process_onlink_prefix(Link *link, sd_ndisc_router *rt) {
-        _cleanup_(route_freep) Route *route = NULL;
+        _cleanup_(route_unrefp) Route *route = NULL;
         unsigned prefixlen, preference;
         usec_t lifetime_usec;
         struct in6_addr prefix;
@@ -563,7 +600,7 @@ static int ndisc_router_process_prefix(Link *link, sd_ndisc_router *rt) {
 }
 
 static int ndisc_router_process_route(Link *link, sd_ndisc_router *rt) {
-        _cleanup_(route_freep) Route *route = NULL;
+        _cleanup_(route_unrefp) Route *route = NULL;
         unsigned preference, prefixlen;
         struct in6_addr gateway, dst;
         usec_t lifetime_usec;
@@ -1118,6 +1155,7 @@ static int ndisc_drop_outdated(Link *link, usec_t timestamp_usec) {
         int r, ret = 0;
 
         assert(link);
+        assert(link->manager);
 
         /* If an address or friends is already assigned, but not valid anymore, then refuse to update it,
          * and let's immediately remove it.
@@ -1125,14 +1163,17 @@ static int ndisc_drop_outdated(Link *link, usec_t timestamp_usec) {
          * valid lifetimes to improve the reaction of SLAAC to renumbering events.
          * See draft-ietf-6man-slaac-renum-02, section 4.2. */
 
-        SET_FOREACH(route, link->routes) {
+        SET_FOREACH(route, link->manager->routes) {
                 if (route->source != NETWORK_CONFIG_SOURCE_NDISC)
+                        continue;
+
+                if (route->nexthop.ifindex != link->ifindex)
                         continue;
 
                 if (route->lifetime_usec >= timestamp_usec)
                         continue; /* the route is still valid */
 
-                r = route_remove_and_drop(route);
+                r = route_remove_and_cancel(route, link->manager);
                 if (r < 0)
                         RET_GATHER(ret, log_link_warning_errno(link, r, "Failed to remove outdated SLAAC route, ignoring: %m"));
         }
@@ -1216,8 +1257,11 @@ static int ndisc_setup_expire(Link *link) {
         assert(link);
         assert(link->manager);
 
-        SET_FOREACH(route, link->routes) {
+        SET_FOREACH(route, link->manager->routes) {
                 if (route->source != NETWORK_CONFIG_SOURCE_NDISC)
+                        continue;
+
+                if (route->nexthop.ifindex != link->ifindex)
                         continue;
 
                 if (!route_exists(route))
@@ -1351,6 +1395,10 @@ static int ndisc_router_handler(Link *link, sd_ndisc_router *rt) {
                 return r;
 
         r = ndisc_router_process_icmp6_ratelimit(link, rt);
+        if (r < 0)
+                return r;
+
+        r = ndisc_router_process_retransmission_time(link, rt);
         if (r < 0)
                 return r;
 

@@ -115,6 +115,25 @@ static int service_dispatch_exec_io(sd_event_source *source, int fd, uint32_t ev
 static void service_enter_signal(Service *s, ServiceState state, ServiceResult f);
 static void service_enter_reload_by_notify(Service *s);
 
+static bool SERVICE_STATE_WITH_MAIN_PROCESS(ServiceState state) {
+        return IN_SET(state,
+                      SERVICE_START, SERVICE_START_POST,
+                      SERVICE_RUNNING,
+                      SERVICE_RELOAD, SERVICE_RELOAD_SIGNAL, SERVICE_RELOAD_NOTIFY,
+                      SERVICE_STOP, SERVICE_STOP_WATCHDOG, SERVICE_STOP_SIGTERM, SERVICE_STOP_SIGKILL, SERVICE_STOP_POST,
+                      SERVICE_FINAL_WATCHDOG, SERVICE_FINAL_SIGTERM, SERVICE_FINAL_SIGKILL);
+}
+
+static bool SERVICE_STATE_WITH_CONTROL_PROCESS(ServiceState state) {
+        return IN_SET(state,
+                      SERVICE_CONDITION,
+                      SERVICE_START_PRE, SERVICE_START, SERVICE_START_POST,
+                      SERVICE_RELOAD, SERVICE_RELOAD_SIGNAL, SERVICE_RELOAD_NOTIFY,
+                      SERVICE_STOP, SERVICE_STOP_WATCHDOG, SERVICE_STOP_SIGTERM, SERVICE_STOP_SIGKILL, SERVICE_STOP_POST,
+                      SERVICE_FINAL_WATCHDOG, SERVICE_FINAL_SIGTERM, SERVICE_FINAL_SIGKILL,
+                      SERVICE_CLEANING);
+}
+
 static void service_init(Unit *u) {
         Service *s = SERVICE(u);
 
@@ -152,22 +171,12 @@ static void service_init(Unit *u) {
 
 static void service_unwatch_control_pid(Service *s) {
         assert(s);
-
-        if (!pidref_is_set(&s->control_pid))
-                return;
-
-        unit_unwatch_pidref(UNIT(s), &s->control_pid);
-        pidref_done(&s->control_pid);
+        unit_unwatch_pidref_done(UNIT(s), &s->control_pid);
 }
 
 static void service_unwatch_main_pid(Service *s) {
         assert(s);
-
-        if (!pidref_is_set(&s->main_pid))
-                return;
-
-        unit_unwatch_pidref(UNIT(s), &s->main_pid);
-        pidref_done(&s->main_pid);
+        unit_unwatch_pidref_done(UNIT(s), &s->main_pid);
 }
 
 static void service_unwatch_pid_file(Service *s) {
@@ -1226,22 +1235,12 @@ static void service_set_state(Service *s, ServiceState state) {
                     SERVICE_CLEANING))
                 s->timer_event_source = sd_event_source_disable_unref(s->timer_event_source);
 
-        if (!IN_SET(state,
-                    SERVICE_START, SERVICE_START_POST,
-                    SERVICE_RUNNING,
-                    SERVICE_RELOAD, SERVICE_RELOAD_SIGNAL, SERVICE_RELOAD_NOTIFY,
-                    SERVICE_STOP, SERVICE_STOP_WATCHDOG, SERVICE_STOP_SIGTERM, SERVICE_STOP_SIGKILL, SERVICE_STOP_POST,
-                    SERVICE_FINAL_WATCHDOG, SERVICE_FINAL_SIGTERM, SERVICE_FINAL_SIGKILL)) {
+        if (!SERVICE_STATE_WITH_MAIN_PROCESS(state)) {
                 service_unwatch_main_pid(s);
                 s->main_command = NULL;
         }
 
-        if (!IN_SET(state,
-                    SERVICE_CONDITION, SERVICE_START_PRE, SERVICE_START, SERVICE_START_POST,
-                    SERVICE_RELOAD, SERVICE_RELOAD_SIGNAL, SERVICE_RELOAD_NOTIFY,
-                    SERVICE_STOP, SERVICE_STOP_WATCHDOG, SERVICE_STOP_SIGTERM, SERVICE_STOP_SIGKILL, SERVICE_STOP_POST,
-                    SERVICE_FINAL_WATCHDOG, SERVICE_FINAL_SIGTERM, SERVICE_FINAL_SIGKILL,
-                    SERVICE_CLEANING)) {
+        if (!SERVICE_STATE_WITH_CONTROL_PROCESS(state)) {
                 service_unwatch_control_pid(s);
                 s->control_command = NULL;
                 s->control_command_id = _SERVICE_EXEC_COMMAND_INVALID;
@@ -1328,12 +1327,7 @@ static int service_coldplug(Unit *u) {
 
         if (pidref_is_set(&s->main_pid) &&
             pidref_is_unwaited(&s->main_pid) > 0 &&
-            (IN_SET(s->deserialized_state,
-                    SERVICE_START, SERVICE_START_POST,
-                    SERVICE_RUNNING,
-                    SERVICE_RELOAD, SERVICE_RELOAD_SIGNAL, SERVICE_RELOAD_NOTIFY,
-                    SERVICE_STOP, SERVICE_STOP_WATCHDOG, SERVICE_STOP_SIGTERM, SERVICE_STOP_SIGKILL, SERVICE_STOP_POST,
-                    SERVICE_FINAL_WATCHDOG, SERVICE_FINAL_SIGTERM, SERVICE_FINAL_SIGKILL))) {
+            SERVICE_STATE_WITH_MAIN_PROCESS(s->deserialized_state)) {
                 r = unit_watch_pidref(UNIT(s), &s->main_pid, /* exclusive= */ false);
                 if (r < 0)
                         return r;
@@ -1341,12 +1335,7 @@ static int service_coldplug(Unit *u) {
 
         if (pidref_is_set(&s->control_pid) &&
             pidref_is_unwaited(&s->control_pid) > 0 &&
-            IN_SET(s->deserialized_state,
-                   SERVICE_CONDITION, SERVICE_START_PRE, SERVICE_START, SERVICE_START_POST,
-                   SERVICE_RELOAD, SERVICE_RELOAD_SIGNAL, SERVICE_RELOAD_NOTIFY,
-                   SERVICE_STOP, SERVICE_STOP_WATCHDOG, SERVICE_STOP_SIGTERM, SERVICE_STOP_SIGKILL, SERVICE_STOP_POST,
-                   SERVICE_FINAL_WATCHDOG, SERVICE_FINAL_SIGTERM, SERVICE_FINAL_SIGKILL,
-                   SERVICE_CLEANING)) {
+            SERVICE_STATE_WITH_CONTROL_PROCESS(s->deserialized_state)) {
                 r = unit_watch_pidref(UNIT(s), &s->control_pid, /* exclusive= */ false);
                 if (r < 0)
                         return r;
@@ -2121,13 +2110,7 @@ static void service_enter_signal(Service *s, ServiceState state, ServiceResult f
         (void) unit_enqueue_rewatch_pids(UNIT(s));
 
         kill_operation = state_to_kill_operation(s, state);
-        r = unit_kill_context(
-                        UNIT(s),
-                        &s->kill_context,
-                        kill_operation,
-                        &s->main_pid,
-                        &s->control_pid,
-                        s->main_pid_alien);
+        r = unit_kill_context(UNIT(s), kill_operation);
         if (r < 0) {
                 log_unit_warning_errno(UNIT(s), r, "Failed to kill processes: %m");
                 goto fail;
@@ -3707,6 +3690,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
         Service *s = SERVICE(u);
         ServiceResult f;
         ExitClean clean_mode;
+        int r;
 
         assert(s);
         assert(pid >= 0);
@@ -3958,7 +3942,6 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
 
                                 if (s->pid_file) {
                                         bool has_start_post;
-                                        int r;
 
                                         /* Let's try to load the pid file here if we can.
                                          * The PID file might actually be created by a START_POST
@@ -3985,8 +3968,6 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                                 }
 
                                 if (s->pid_file) {
-                                        int r;
-
                                         r = service_load_pid_file(s, true);
                                         if (r < 0) {
                                                 r = service_demand_pid_file(s);
@@ -4786,8 +4767,13 @@ static void service_reset_failed(Unit *u) {
         s->flush_n_restarts = false;
 }
 
-static PidRef* service_main_pid(Unit *u) {
-        return &ASSERT_PTR(SERVICE(u))->main_pid;
+static PidRef* service_main_pid(Unit *u, bool *ret_is_alien) {
+        Service *s = ASSERT_PTR(SERVICE(u));
+
+        if (ret_is_alien)
+                *ret_is_alien = s->main_pid_alien;
+
+        return &s->main_pid;
 }
 
 static PidRef* service_control_pid(Unit *u) {

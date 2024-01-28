@@ -1418,28 +1418,25 @@ static int method_terminate_seat(sd_bus_message *message, void *userdata, sd_bus
 }
 
 static int method_set_user_linger(sd_bus_message *message, void *userdata, sd_bus_error *error) {
-        _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
-        _cleanup_free_ char *cc = NULL;
         Manager *m = ASSERT_PTR(userdata);
-        int r, b, interactive;
-        struct passwd *pw;
-        const char *path;
+        _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
         uint32_t uid, auth_uid;
+        int r, enable, interactive;
 
         assert(message);
 
-        r = sd_bus_message_read(message, "ubb", &uid, &b, &interactive);
+        r = sd_bus_message_read(message, "ubb", &uid, &enable, &interactive);
         if (r < 0)
                 return r;
 
-        r = sd_bus_query_sender_creds(message, SD_BUS_CREDS_EUID |
-                                               SD_BUS_CREDS_OWNER_UID|SD_BUS_CREDS_AUGMENT, &creds);
+        r = sd_bus_query_sender_creds(message,
+                                      SD_BUS_CREDS_EUID|SD_BUS_CREDS_OWNER_UID|SD_BUS_CREDS_AUGMENT,
+                                      &creds);
         if (r < 0)
                 return r;
 
         if (!uid_is_valid(uid)) {
-                /* Note that we get the owner UID of the session or user unit,
-                 * not the actual client UID here! */
+                /* Note that we get the owner UID of the session or user unit, not the actual client UID here! */
                 r = sd_bus_creds_get_owner_uid(creds, &uid);
                 if (r < 0)
                         return r;
@@ -1450,10 +1447,11 @@ static int method_set_user_linger(sd_bus_message *message, void *userdata, sd_bu
         if (r < 0)
                 return r;
 
-        errno = 0;
-        pw = getpwuid(uid);
-        if (!pw)
-                return errno_or_else(ENOENT);
+        _cleanup_free_ struct passwd *pw = NULL;
+
+        r = getpwuid_malloc(uid, &pw);
+        if (r < 0)
+                return r;
 
         r = bus_verify_polkit_async_full(
                         message,
@@ -1474,24 +1472,30 @@ static int method_set_user_linger(sd_bus_message *message, void *userdata, sd_bu
         if (r < 0)
                 return r;
 
-        cc = cescape(pw->pw_name);
-        if (!cc)
+        _cleanup_free_ char *escaped = NULL;
+        const char *path;
+        User *u;
+
+        escaped = cescape(pw->pw_name);
+        if (!escaped)
                 return -ENOMEM;
 
-        path = strjoina("/var/lib/systemd/linger/", cc);
-        if (b) {
-                User *u;
+        path = strjoina("/var/lib/systemd/linger/", escaped);
 
+        if (enable) {
                 r = touch(path);
                 if (r < 0)
                         return r;
 
-                if (manager_add_user_by_uid(m, uid, &u) >= 0)
-                        user_start(u);
+                if (manager_add_user_by_uid(m, uid, &u) >= 0) {
+                        r = user_start(u);
+                        if (r < 0) {
+                                user_add_to_gc_queue(u);
+                                return r;
+                        }
+                }
 
         } else {
-                User *u;
-
                 r = unlink(path);
                 if (r < 0 && errno != ENOENT)
                         return -errno;
@@ -4073,11 +4077,9 @@ static int session_jobs_reply(Session *s, uint32_t jid, const char *unit, const 
 }
 
 int match_job_removed(sd_bus_message *message, void *userdata, sd_bus_error *error) {
-        const char *path, *result, *unit;
         Manager *m = ASSERT_PTR(userdata);
-        Session *session;
+        const char *path, *result, *unit;
         uint32_t id;
-        User *user;
         int r;
 
         assert(message);
@@ -4100,6 +4102,9 @@ int match_job_removed(sd_bus_message *message, void *userdata, sd_bus_error *err
                 return 0;
         }
 
+        Session *session;
+        User *user;
+
         session = hashmap_get(m->session_units, unit);
         if (session) {
                 if (streq_ptr(path, session->scope_job)) {
@@ -4115,11 +4120,13 @@ int match_job_removed(sd_bus_message *message, void *userdata, sd_bus_error *err
 
         user = hashmap_get(m->user_units, unit);
         if (user) {
-                if (streq_ptr(path, user->service_job)) {
+                /* If the user is stopping, we're tracking stop jobs here. So don't send reply. */
+                if (!user->stopping && streq_ptr(path, user->service_job)) {
                         user->service_job = mfree(user->service_job);
 
                         LIST_FOREACH(sessions_by_user, s, user->sessions)
-                                (void) session_jobs_reply(s, id, unit, NULL /* don't propagate user service failures to the client */);
+                                /* Don't propagate user service failures to the client */
+                                (void) session_jobs_reply(s, id, unit, /* error = */ NULL);
 
                         user_save(user);
                 }

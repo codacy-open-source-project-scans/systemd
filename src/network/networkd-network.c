@@ -188,7 +188,7 @@ int network_verify(Network *network) {
                                     network->filename);
 
                 network->addresses_by_section = ordered_hashmap_free(network->addresses_by_section);
-                network->routes_by_section = hashmap_free_with_destructor(network->routes_by_section, route_free);
+                network->routes_by_section = hashmap_free(network->routes_by_section);
         }
 
         if (network->link_local < 0) {
@@ -483,6 +483,7 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
                 .ipv6_accept_ra_use_onlink_prefix = true,
                 .ipv6_accept_ra_use_mtu = true,
                 .ipv6_accept_ra_use_hop_limit = true,
+                .ipv6_accept_ra_use_retransmission_time = true,
                 .ipv6_accept_ra_use_icmp6_ratelimit = true,
                 .ipv6_accept_ra_route_table = RT_TABLE_MAIN,
                 .ipv6_accept_ra_route_metric_high = IPV6RA_ROUTE_METRIC_HIGH,
@@ -781,7 +782,7 @@ static Network *network_free(Network *network) {
         /* static configs */
         set_free_free(network->ipv6_proxy_ndp_addresses);
         ordered_hashmap_free(network->addresses_by_section);
-        hashmap_free_with_destructor(network->routes_by_section, route_free);
+        hashmap_free(network->routes_by_section);
         ordered_hashmap_free(network->nexthops_by_section);
         hashmap_free_with_destructor(network->bridge_fdb_entries_by_section, bridge_fdb_free);
         hashmap_free_with_destructor(network->bridge_mdb_entries_by_section, bridge_mdb_free);

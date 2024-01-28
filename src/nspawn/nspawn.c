@@ -236,6 +236,7 @@ static bool arg_suppress_sync = false;
 static char *arg_settings_filename = NULL;
 static Architecture arg_architecture = _ARCHITECTURE_INVALID;
 static ImagePolicy *arg_image_policy = NULL;
+static char *arg_background = NULL;
 
 STATIC_DESTRUCTOR_REGISTER(arg_directory, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_template, freep);
@@ -272,6 +273,7 @@ STATIC_DESTRUCTOR_REGISTER(arg_sysctl, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_bind_user, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_settings_filename, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_image_policy, image_policy_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_background, freep);
 
 static int handle_arg_console(const char *arg) {
         if (streq(arg, "help")) {
@@ -325,8 +327,8 @@ static int help(void) {
                "     --version              Print version string\n"
                "  -q --quiet                Do not show status information\n"
                "     --no-pager             Do not pipe output into a pager\n"
-               "     --settings=BOOLEAN     Load additional settings from .nspawn file\n\n"
-               "%3$sImage:%4$s\n"
+               "     --settings=BOOLEAN     Load additional settings from .nspawn file\n"
+               "\n%3$sImage:%4$s\n"
                "  -D --directory=PATH       Root directory for the container\n"
                "     --template=PATH        Initialize root directory from template directory,\n"
                "                            if missing\n"
@@ -345,8 +347,8 @@ static int help(void) {
                "                            'base64:'\n"
                "     --verity-data=PATH     Specify hash device for verity\n"
                "     --pivot-root=PATH[:PATH]\n"
-               "                            Pivot root to given directory in the container\n\n"
-               "%3$sExecution:%4$s\n"
+               "                            Pivot root to given directory in the container\n"
+               "\n%3$sExecution:%4$s\n"
                "  -a --as-pid2              Maintain a stub init as PID1, invoke binary as PID2\n"
                "  -b --boot                 Boot up full system (i.e. invoke init)\n"
                "     --chdir=PATH           Set working directory in the container\n"
@@ -355,18 +357,18 @@ static int help(void) {
                "     --kill-signal=SIGNAL   Select signal to use for shutting down PID 1\n"
                "     --notify-ready=BOOLEAN Receive notifications from the child init process\n"
                "     --suppress-sync=BOOLEAN\n"
-               "                            Suppress any form of disk data synchronization\n\n"
-               "%3$sSystem Identity:%4$s\n"
+               "                            Suppress any form of disk data synchronization\n"
+               "\n%3$sSystem Identity:%4$s\n"
                "  -M --machine=NAME         Set the machine name for the container\n"
                "     --hostname=NAME        Override the hostname for the container\n"
-               "     --uuid=UUID            Set a specific machine UUID for the container\n\n"
-               "%3$sProperties:%4$s\n"
+               "     --uuid=UUID            Set a specific machine UUID for the container\n"
+               "\n%3$sProperties:%4$s\n"
                "  -S --slice=SLICE          Place the container in the specified slice\n"
                "     --property=NAME=VALUE  Set scope unit property\n"
                "     --register=BOOLEAN     Register container as machine\n"
                "     --keep-unit            Do not register a scope for the machine, reuse\n"
-               "                            the service unit nspawn is running in\n\n"
-               "%3$sUser Namespacing:%4$s\n"
+               "                            the service unit nspawn is running in\n"
+               "\n%3$sUser Namespacing:%4$s\n"
                "     --private-users=no     Run without user namespacing\n"
                "     --private-users=yes|pick|identity\n"
                "                            Run within user namespace, autoselect UID/GID range\n"
@@ -376,8 +378,8 @@ static int help(void) {
                "                            Adjust ('chown') or map ('map') OS tree ownership\n"
                "                            to private UID/GID range\n"
                "  -U                        Equivalent to --private-users=pick and\n"
-               "                            --private-users-ownership=auto\n\n"
-               "%3$sNetworking:%4$s\n"
+               "                            --private-users-ownership=auto\n"
+               "\n%3$sNetworking:%4$s\n"
                "     --private-network      Disable network in container\n"
                "     --network-interface=HOSTIF[:CONTAINERIF]\n"
                "                            Assign an existing network interface to the\n"
@@ -402,8 +404,8 @@ static int help(void) {
                "                            Set network namespace to the one represented by\n"
                "                            the specified kernel namespace file node\n"
                "  -p --port=[PROTOCOL:]HOSTPORT[:CONTAINERPORT]\n"
-               "                            Expose a container IP port on the host\n\n"
-               "%3$sSecurity:%4$s\n"
+               "                            Expose a container IP port on the host\n"
+               "\n%3$sSecurity:%4$s\n"
                "     --capability=CAP       In addition to the default, retain specified\n"
                "                            capability\n"
                "     --drop-capability=CAP  Drop the specified capability from the default set\n"
@@ -418,20 +420,20 @@ static int help(void) {
                "                            processes in the container\n"
                "  -L --selinux-apifs-context=SECLABEL\n"
                "                            Set the SELinux security context to be used by\n"
-               "                            API/tmpfs file systems in the container\n\n"
-               "%3$sResources:%4$s\n"
+               "                            API/tmpfs file systems in the container\n"
+               "\n%3$sResources:%4$s\n"
                "     --rlimit=NAME=LIMIT    Set a resource limit for the payload\n"
                "     --oom-score-adjust=VALUE\n"
                "                            Adjust the OOM score value for the payload\n"
                "     --cpu-affinity=CPUS    Adjust the CPU affinity of the container\n"
-               "     --personality=ARCH     Pick personality for this container\n\n"
-               "%3$sIntegration:%4$s\n"
+               "     --personality=ARCH     Pick personality for this container\n"
+               "\n%3$sIntegration:%4$s\n"
                "     --resolv-conf=MODE     Select mode of /etc/resolv.conf initialization\n"
                "     --timezone=MODE        Select mode of /etc/localtime initialization\n"
                "     --link-journal=MODE    Link up guest journal, one of no, auto, guest, \n"
                "                            host, try-guest, try-host\n"
-               "  -j                        Equivalent to --link-journal=try-guest\n\n"
-               "%3$sMounts:%4$s\n"
+               "  -j                        Equivalent to --link-journal=try-guest\n"
+               "\n%3$sMounts:%4$s\n"
                "     --bind=PATH[:PATH[:OPTIONS]]\n"
                "                            Bind mount a file or directory from the host into\n"
                "                            the container\n"
@@ -445,12 +447,13 @@ static int help(void) {
                "                            the container\n"
                "     --overlay-ro=PATH[:PATH...]:PATH\n"
                "                            Similar, but creates a read-only overlay mount\n"
-               "     --bind-user=NAME       Bind user from host to container\n\n"
-               "%3$sInput/Output:%4$s\n"
+               "     --bind-user=NAME       Bind user from host to container\n"
+               "\n%3$sInput/Output:%4$s\n"
                "     --console=MODE         Select how stdin/stdout/stderr and /dev/console are\n"
                "                            set up for the container.\n"
-               "  -P --pipe                 Equivalent to --console=pipe\n\n"
-               "%3$sCredentials:%4$s\n"
+               "  -P --pipe                 Equivalent to --console=pipe\n"
+               "     --background=COLOR     Set ANSI color for background\n"
+               "\n%3$sCredentials:%4$s\n"
                "     --set-credential=ID:VALUE\n"
                "                            Pass a credential with literal value to container.\n"
                "     --load-credential=ID:PATH\n"
@@ -745,6 +748,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_BIND_USER,
                 ARG_SUPPRESS_SYNC,
                 ARG_IMAGE_POLICY,
+                ARG_BACKGROUND,
         };
 
         static const struct option options[] = {
@@ -819,6 +823,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "bind-user",              required_argument, NULL, ARG_BIND_USER              },
                 { "suppress-sync",          required_argument, NULL, ARG_SUPPRESS_SYNC          },
                 { "image-policy",           required_argument, NULL, ARG_IMAGE_POLICY           },
+                { "background",             required_argument, NULL, ARG_BACKGROUND             },
                 {}
         };
 
@@ -1604,6 +1609,12 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case ARG_IMAGE_POLICY:
                         r = parse_image_policy_argument(optarg, &arg_image_policy);
+                        if (r < 0)
+                                return r;
+                        break;
+
+                case ARG_BACKGROUND:
+                        r = free_and_strdup_warn(&arg_background, optarg);
                         if (r < 0)
                                 return r;
                         break;
@@ -4211,13 +4222,13 @@ static int uid_shift_pick(uid_t *shift, LockFile *ret_lock_file) {
                         return r;
 
                 /* Make some superficial checks whether the range is currently known in the user database */
-                if (getpwuid(candidate))
+                if (getpwuid_malloc(candidate, /* ret= */ NULL) >= 0)
                         goto next;
-                if (getpwuid(candidate + UINT32_C(0xFFFE)))
+                if (getpwuid_malloc(candidate + UINT32_C(0xFFFE), /* ret= */ NULL) >= 0)
                         goto next;
-                if (getgrgid(candidate))
+                if (getgrgid_malloc(candidate, /* ret= */ NULL) >= 0)
                         goto next;
-                if (getgrgid(candidate + UINT32_C(0xFFFE)))
+                if (getgrgid_malloc(candidate + UINT32_C(0xFFFE), /* ret= */ NULL) >= 0)
                         goto next;
 
                 *ret_lock_file = lf;
@@ -5339,9 +5350,22 @@ static int run_container(
                                 return log_error_errno(r, "Failed to create PTY forwarder: %m");
 
                         if (arg_console_width != UINT_MAX || arg_console_height != UINT_MAX)
-                                (void) pty_forward_set_width_height(forward,
-                                                                    arg_console_width,
-                                                                    arg_console_height);
+                                (void) pty_forward_set_width_height(
+                                                forward,
+                                                arg_console_width,
+                                                arg_console_height);
+
+                        if (!arg_background) {
+                                _cleanup_free_ char *bg = NULL;
+
+                                r = terminal_tint_color(220 /* blue */, &bg);
+                                if (r < 0)
+                                        log_debug_errno(r, "Failed to determine terminal background color, not tinting.");
+                                else
+                                        (void) pty_forward_set_background_color(forward, bg);
+                        } else if (!isempty(arg_background))
+                                (void) pty_forward_set_background_color(forward, arg_background);
+
                         break;
 
                 default:
@@ -5943,9 +5967,16 @@ static int run(int argc, char *argv[]) {
         if (arg_console_mode == CONSOLE_PIPE) /* if we pass STDERR on to the container, don't add our own logs into it too */
                 arg_quiet = true;
 
-        if (!arg_quiet)
-                log_info("Spawning container %s on %s.\nPress Ctrl-] three times within 1s to kill container.",
-                         arg_machine, arg_image ?: arg_directory);
+        if (!arg_quiet) {
+                const char *t = arg_image ?: arg_directory;
+                _cleanup_free_ char *u = NULL;
+                (void) terminal_urlify_path(t, t, &u);
+
+                log_info("%s %sSpawning container %s on %s.%s\n"
+                         "%s %sPress %sCtrl-]%s three times within 1s to kill container.%s",
+                         special_glyph(SPECIAL_GLYPH_LIGHT_SHADE), ansi_grey(), arg_machine, u ?: t, ansi_normal(),
+                         special_glyph(SPECIAL_GLYPH_LIGHT_SHADE), ansi_grey(), ansi_highlight(), ansi_grey(), ansi_normal());
+        }
 
         assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGCHLD, SIGWINCH, SIGTERM, SIGINT, SIGRTMIN+18, -1) >= 0);
 
