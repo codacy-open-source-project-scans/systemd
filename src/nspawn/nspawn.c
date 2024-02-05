@@ -1728,8 +1728,10 @@ static int verify_arguments(void) {
         if (arg_ephemeral && arg_template)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "--ephemeral and --template= may not be combined.");
 
-        if (arg_ephemeral && !IN_SET(arg_link_journal, LINK_NO, LINK_AUTO))
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "--ephemeral and --link-journal= may not be combined.");
+        /* Permit --ephemeral with --link-journal=try-* to satisfy principle of the least astonishment
+         * (by common sense, "try" means "do not fail if not possible") */
+        if (arg_ephemeral && !IN_SET(arg_link_journal, LINK_NO, LINK_AUTO) && !arg_link_journal_try)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "--ephemeral and --link-journal={host,guest} may not be combined.");
 
         if (arg_userns_mode != USER_NAMESPACE_NO && !userns_supported())
                 return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP), "--private-users= is not supported, kernel compiled without user namespace support.");
@@ -5622,6 +5624,10 @@ static int run(int argc, char *argv[]) {
         }
 
         r = verify_arguments();
+        if (r < 0)
+                goto finish;
+
+        r = resolve_network_interface_names(arg_network_interfaces);
         if (r < 0)
                 goto finish;
 
