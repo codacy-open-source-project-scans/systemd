@@ -3090,6 +3090,7 @@ static int apply_mount_namespace(
                 const ExecParameters *params,
                 ExecRuntime *runtime,
                 const char *memory_pressure_path,
+                bool needs_sandboxing,
                 char **error_path) {
 
         _cleanup_(verity_settings_done) VeritySettings verity = VERITY_SETTINGS_DEFAULT;
@@ -3099,7 +3100,7 @@ static int apply_mount_namespace(
                 *extension_dir = NULL, *host_os_release_stage = NULL, *root_image = NULL, *root_dir = NULL;
         const char *tmp_dir = NULL, *var_tmp_dir = NULL;
         char **read_write_paths;
-        bool needs_sandboxing, setup_os_release_symlink;
+        bool setup_os_release_symlink;
         BindMount *bind_mounts = NULL;
         size_t n_bind_mounts = 0;
         int r;
@@ -3145,7 +3146,6 @@ static int apply_mount_namespace(
         } else
                 read_write_paths = context->read_write_paths;
 
-        needs_sandboxing = (params->flags & EXEC_APPLY_SANDBOXING) && !(command_flags & EXEC_COMMAND_FULLY_PRIVILEGED);
         if (needs_sandboxing) {
                 /* The runtime struct only contains the parent of the private /tmp, which is non-accessible
                  * to world users. Inside of it there's a /tmp that is sticky, and that's the one we want to
@@ -3175,11 +3175,9 @@ static int apply_mount_namespace(
                                params,
                                "shared mount propagation hidden by other fs namespacing unit settings: ignoring");
 
-        if (FLAGS_SET(params->flags, EXEC_WRITE_CREDENTIALS)) {
-                r = exec_context_get_credential_directory(context, params, params->unit_id, &creds_path);
-                if (r < 0)
-                        return r;
-        }
+        r = exec_context_get_credential_directory(context, params, params->unit_id, &creds_path);
+        if (r < 0)
+                return r;
 
         if (params->runtime_scope == RUNTIME_SCOPE_SYSTEM) {
                 propagate_dir = path_join("/run/systemd/propagate/", params->unit_id);
@@ -3337,31 +3335,39 @@ static int apply_working_directory(
                 const char *home,
                 int *exit_status) {
 
-        const char *d, *wd;
+        const char *wd;
+        int r;
 
         assert(context);
         assert(exit_status);
 
         if (context->working_directory_home) {
-
                 if (!home) {
                         *exit_status = EXIT_CHDIR;
                         return -ENXIO;
                 }
 
                 wd = home;
-
         } else
                 wd = empty_to_root(context->working_directory);
 
         if (params->flags & EXEC_APPLY_CHROOT)
-                d = wd;
-        else
-                d = prefix_roota((runtime ? runtime->ephemeral_copy : NULL) ?: context->root_directory, wd);
+                r = RET_NERRNO(chdir(wd));
+        else {
+                _cleanup_close_ int dfd = -EBADF;
 
-        if (chdir(d) < 0 && !context->working_directory_missing_ok) {
+                r = chase(wd,
+                          (runtime ? runtime->ephemeral_copy : NULL) ?: context->root_directory,
+                          CHASE_PREFIX_ROOT|CHASE_AT_RESOLVE_IN_ROOT,
+                          /* ret_path= */ NULL,
+                          &dfd);
+                if (r >= 0)
+                        r = RET_NERRNO(fchdir(dfd));
+        }
+
+        if (r < 0 && !context->working_directory_missing_ok) {
                 *exit_status = EXIT_CHDIR;
-                return -errno;
+                return r;
         }
 
         return 0;
@@ -4526,12 +4532,10 @@ int exec_invoke(
                         return log_exec_error_errno(context, params, r, "Failed to set up special execution directory in %s: %m", params->prefix[dt]);
         }
 
-        if (FLAGS_SET(params->flags, EXEC_WRITE_CREDENTIALS)) {
-                r = exec_setup_credentials(context, params, params->unit_id, uid, gid);
-                if (r < 0) {
-                        *exit_status = EXIT_CREDENTIALS;
-                        return log_exec_error_errno(context, params, r, "Failed to set up credentials: %m");
-                }
+        r = exec_setup_credentials(context, params, params->unit_id, uid, gid);
+        if (r < 0) {
+                *exit_status = EXIT_CREDENTIALS;
+                return log_exec_error_errno(context, params, r, "Failed to set up credentials: %m");
         }
 
         r = build_environment(
@@ -4738,7 +4742,13 @@ int exec_invoke(
         if (needs_mount_namespace) {
                 _cleanup_free_ char *error_path = NULL;
 
-                r = apply_mount_namespace(command->flags, context, params, runtime, memory_pressure_path, &error_path);
+                r = apply_mount_namespace(command->flags,
+                                          context,
+                                          params,
+                                          runtime,
+                                          memory_pressure_path,
+                                          needs_sandboxing,
+                                          &error_path);
                 if (r < 0) {
                         *exit_status = EXIT_NAMESPACE;
                         return log_exec_error_errno(context, params, r, "Failed to set up mount namespacing%s%s: %m",
@@ -5026,8 +5036,10 @@ int exec_invoke(
                 }
         }
 
-        /* Apply working directory here, because the working directory might be on NFS and only the user running
-         * this service might have the correct privilege to change to the working directory */
+        /* Apply working directory here, because the working directory might be on NFS and only the user
+         * running this service might have the correct privilege to change to the working directory. Also, it
+         * is absolutely 💣 crucial 💣 we applied all mount namespacing rearrangements before this, so that
+         * the cwd cannot be used to pin directories outside of the sandbox. */
         r = apply_working_directory(context, params, runtime, home, exit_status);
         if (r < 0)
                 return log_exec_error_errno(context, params, r, "Changing to the requested working directory failed: %m");
