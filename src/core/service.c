@@ -460,6 +460,7 @@ static void service_done(Unit *u) {
         s->status_text = mfree(s->status_text);
 
         s->exec_runtime = exec_runtime_free(s->exec_runtime);
+
         exec_command_free_array(s->exec_command, _SERVICE_EXEC_COMMAND_MAX);
         s->control_command = NULL;
         s->main_command = NULL;
@@ -662,12 +663,8 @@ static int service_verify(Service *s) {
         if (s->type != SERVICE_ONESHOT && s->exec_command[SERVICE_EXEC_START]->command_next)
                 return log_unit_error_errno(UNIT(s), SYNTHETIC_ERRNO(ENOEXEC), "Service has more than one ExecStart= setting, which is only allowed for Type=oneshot services. Refusing.");
 
-        if (s->type == SERVICE_ONESHOT &&
-            !IN_SET(s->restart, SERVICE_RESTART_NO, SERVICE_RESTART_ON_FAILURE, SERVICE_RESTART_ON_ABNORMAL, SERVICE_RESTART_ON_WATCHDOG, SERVICE_RESTART_ON_ABORT))
+        if (s->type == SERVICE_ONESHOT && IN_SET(s->restart, SERVICE_RESTART_ALWAYS, SERVICE_RESTART_ON_SUCCESS))
                 return log_unit_error_errno(UNIT(s), SYNTHETIC_ERRNO(ENOEXEC), "Service has Restart= set to either always or on-success, which isn't allowed for Type=oneshot services. Refusing.");
-
-        if (s->type == SERVICE_ONESHOT && !exit_status_set_is_empty(&s->restart_force_status))
-                return log_unit_error_errno(UNIT(s), SYNTHETIC_ERRNO(ENOEXEC), "Service has RestartForceExitStatus= set, which isn't allowed for Type=oneshot services. Refusing.");
 
         if (s->type == SERVICE_ONESHOT && s->exit_type == SERVICE_EXIT_CGROUP)
                 return log_unit_error_errno(UNIT(s), SYNTHETIC_ERRNO(ENOEXEC), "Service has ExitType=cgroup set, which isn't allowed for Type=oneshot services. Refusing.");
@@ -1349,6 +1346,7 @@ static int service_coldplug(Unit *u) {
                     SERVICE_DEAD_RESOURCES_PINNED)) {
                 (void) unit_enqueue_rewatch_pids(u);
                 (void) unit_setup_exec_runtime(u);
+                (void) unit_setup_cgroup_runtime(u);
         }
 
         if (IN_SET(s->deserialized_state, SERVICE_START_POST, SERVICE_RUNNING, SERVICE_RELOAD, SERVICE_RELOAD_SIGNAL, SERVICE_RELOAD_NOTIFY))
@@ -1889,10 +1887,10 @@ static int cgroup_good(Service *s) {
         /* Returns 0 if the cgroup is empty or doesn't exist, > 0 if it is exists and is populated, < 0 if we can't
          * figure it out */
 
-        if (!UNIT(s)->cgroup_path)
+        if (!s->cgroup_runtime || !s->cgroup_runtime->cgroup_path)
                 return 0;
 
-        r = cg_is_empty_recursive(SYSTEMD_CGROUP_CONTROLLER, UNIT(s)->cgroup_path);
+        r = cg_is_empty_recursive(SYSTEMD_CGROUP_CONTROLLER, s->cgroup_runtime->cgroup_path);
         if (r < 0)
                 return r;
 
@@ -1901,6 +1899,7 @@ static int cgroup_good(Service *s) {
 
 static bool service_shall_restart(Service *s, const char **reason) {
         assert(s);
+        assert(reason);
 
         /* Don't restart after manual stops */
         if (s->forbid_restart) {
@@ -1916,6 +1915,13 @@ static bool service_shall_restart(Service *s, const char **reason) {
 
         /* Restart if the exit code/status are configured as restart triggers */
         if (exit_status_set_test(&s->restart_force_status,  s->main_exec_status.code, s->main_exec_status.status)) {
+                /* Don't allow Type=oneshot services to restart on success. Note that Restart=always/on-success
+                 * is already rejected in service_verify. */
+                if (s->type == SERVICE_ONESHOT && s->result == SERVICE_SUCCESS) {
+                        *reason = "service type and exit status";
+                        return false;
+                }
+
                 *reason = "forced by exit status";
                 return true;
         }
@@ -2769,7 +2775,9 @@ static int service_start(Unit *u) {
                 s->flush_n_restarts = false;
         }
 
-        u->reset_accounting = true;
+        CGroupRuntime *crt = unit_get_cgroup_runtime(u);
+        if (crt)
+                crt->reset_accounting = true;
 
         service_enter_condition(s);
         return 1;
@@ -4309,29 +4317,30 @@ static bool service_notify_message_authorized(Service *s, pid_t pid, FDSet *fds)
         NotifyAccess notify_access = service_get_notify_access(s);
 
         if (notify_access == NOTIFY_NONE) {
+                /* Warn level only if no notifications are expected */
                 log_unit_warning(UNIT(s), "Got notification message from PID "PID_FMT", but reception is disabled.", pid);
                 return false;
         }
 
         if (notify_access == NOTIFY_MAIN && pid != s->main_pid.pid) {
                 if (pidref_is_set(&s->main_pid))
-                        log_unit_warning(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for main PID "PID_FMT, pid, s->main_pid.pid);
+                        log_unit_debug(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for main PID "PID_FMT, pid, s->main_pid.pid);
                 else
-                        log_unit_warning(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for main PID which is currently not known", pid);
+                        log_unit_debug(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for main PID which is currently not known", pid);
 
                 return false;
         }
 
         if (notify_access == NOTIFY_EXEC && pid != s->main_pid.pid && pid != s->control_pid.pid) {
                 if (pidref_is_set(&s->main_pid) && pidref_is_set(&s->control_pid))
-                        log_unit_warning(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for main PID "PID_FMT" and control PID "PID_FMT,
+                        log_unit_debug(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for main PID "PID_FMT" and control PID "PID_FMT,
                                          pid, s->main_pid.pid, s->control_pid.pid);
                 else if (pidref_is_set(&s->main_pid))
-                        log_unit_warning(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for main PID "PID_FMT, pid, s->main_pid.pid);
+                        log_unit_debug(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for main PID "PID_FMT, pid, s->main_pid.pid);
                 else if (pidref_is_set(&s->control_pid))
-                        log_unit_warning(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for control PID "PID_FMT, pid, s->control_pid.pid);
+                        log_unit_debug(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for control PID "PID_FMT, pid, s->control_pid.pid);
                 else
-                        log_unit_warning(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for main PID and control PID which are currently not known", pid);
+                        log_unit_debug(UNIT(s), "Got notification message from PID "PID_FMT", but reception only permitted for main PID and control PID which are currently not known", pid);
 
                 return false;
         }
@@ -5144,6 +5153,7 @@ const UnitVTable service_vtable = {
         .cgroup_context_offset = offsetof(Service, cgroup_context),
         .kill_context_offset = offsetof(Service, kill_context),
         .exec_runtime_offset = offsetof(Service, exec_runtime),
+        .cgroup_runtime_offset = offsetof(Service, cgroup_runtime),
 
         .sections =
                 "Unit\0"

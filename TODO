@@ -132,6 +132,27 @@ Deprecations and removals:
 
 Features:
 
+* in os-release define a field that can be initialized at build time from
+  SOURCE_DATE_EPOCH (maybe even under that name?). Would then be used to
+  initialize the timestamp logic of ConditionNeedsUpdate=.
+
+* new systemd-analyze "join" verb or so, for debugging services. Would be
+  nsenter on steroids, i.e invoke a shell or command line in an environment as
+  close as we can make it for the MainPID of a service. Should be built around
+  pidfd, so that we can reasonably robustly do this. Would only cover the
+  execution environment like namespaces, but not the privilege settings.
+
+* add a generic client to importd called importctl, then make machinectl just
+  chain-exec() it. Make sure importd/importctl can be used for sysext images,
+  portable images too.
+
+* varlink: extend varlink IDL macros to include documentation strings
+
+* Introduce a CGroupRef structure, inspired by PidRef. Should contain cgroup
+  path, cgroup id, and cgroup fd. Use it to continuously pin all v2 cgroups via
+  a cgroup_ref field in the CGroupRuntime structure. Eventually switch things
+  over to do all cgroupfs access only via that structure's fd.
+
 * Get rid of the symlinks in /run/systemd/units/* and exclusively use cgroupfs
   xattrs to convey info about invocation ids, logging settings and so on.
   support for cgroupfs xattrs in the "trusted." namespace was added in linux
@@ -318,12 +339,6 @@ Features:
   /var/lib/sysexts/ which can be used to place only DDIs that shall be used as
   sysext
 
-* in pid1: move out all cgroup state settings from Unit into a new object
-  CGroupState or so which is allocated when we realize the unit into a cgroup,
-  and then remains referenced by it. The new object should also carry an fd to
-  the realized cgroup, to pin it (and later execute all cgroup operations over,
-  once we drop cgroupv1 compat).
-
 * Varlinkification of the following command line tools, to open them up to
   other programs via IPC:
   - bootctl
@@ -335,7 +350,6 @@ Features:
   - systemd-dissect
   - systemd-sysupdate
   - systemd-analyze
-  - systemd-pcrlock (to allow fwupd to relax policy)
   - kernel-install
   - systemd-mount (with PK so that desktop environments could use it to mount disks)
 
@@ -1180,16 +1194,8 @@ Features:
   passwords, not just the first. i.e. if there are multiple defined, prefer
   unlocked over locked and prefer non-empty over empty.
 
-* homed: while a home dir is not activated generate slightly different NSS
-  records for it, that reports the home dir as "/" and the shell as some binary
-  provided by us. Then, when an SSH login happens and SSH permits it our binary
-  is invoked. This binary can then talk to homed and activate the homedir if
-  it's not around yet, prompting the user for a password. Once that succeeded
-  we'll switch to the real user record, i.e. home dir and shell, and our tool
-  exec()s the latter. Net effect: ssh'ing into a homed account will just work:
-  we'll neatly prompt for the homedir's password if its needed. –– Building on
-  this we could take this even further: since this tool will potentially have
-  access to the client's ssh-agent (if ssh-agent forwarding is enabled) we
+* homed: if the homed shell fallback thing has access to an SSH agent, try to
+  use it to unlock home dir (if ssh-agent forwarding is enabled). We
   could implement SSH unlocking of a homedir with that: when enrolling a new
   ssh pubkey in a user record we'd ask the ssh-agent to sign some random value
   with the privkey, then use that as luks key to unlock the home dir. Will not
@@ -2239,10 +2245,6 @@ Features:
     can easily set overall quota for all users
   - on login, if we can't fallocate initially, but rebalance is on, then allow
     login in discard mode, then immediately rebalance, then turn off discard
-  - extend user records with optional "bulk" data. Specifically, a user
-    avatar/photo or so. This data should be stored along with the user record,
-    but probably shouldn't be part of the record itself, since it might be
-    large.
   - add "homectl unbind" command to remove local user record of an inactive
     home dir
 
@@ -2446,18 +2448,17 @@ Features:
 * support crash reporting operation modes (https://live.gnome.org/GnomeOS/Design/Whiteboards/ProblemReporting)
 
 * tmpfiles:
-  - apply "x" on "D" too (see patch from William Douglas)
   - allow time-based cleanup in r and R too
   - instead of ignoring unknown fields, reject them.
   - creating new directories/subvolumes/fifos/device nodes
     should not follow symlinks. None of the other adjustment or creation
     calls follow symlinks.
-  - add --test mode
   - teach tmpfiles.d q/Q logic something sensible in the context of XFS/ext4
     project quota
   - teach tmpfiles.d m/M to move / atomic move + symlink old -> new
   - add new line type for setting btrfs subvolume attributes (i.e. rw/ro)
   - tmpfiles: add new line type for setting fcaps
+  - add -n as shortcut for --dry-run in tmpfiles & sysusers & possibly other places
 
 * udev-link-config:
    - Make sure ID_PATH is always exported and complete for

@@ -238,10 +238,10 @@ static void flood_test(const char *address) {
 
 static void *thread(void *arg) {
         _cleanup_(varlink_flush_close_unrefp) Varlink *c = NULL;
-        _cleanup_(json_variant_unrefp) JsonVariant *i = NULL, *j = NULL;
-        JsonVariant *o = NULL, *k = NULL;
+        _cleanup_(json_variant_unrefp) JsonVariant *i = NULL;
+        _cleanup_(json_variant_unrefp) JsonVariant *wrong = NULL;
+        JsonVariant *o = NULL, *k = NULL, *j = NULL;
         const char *error_id;
-        VarlinkReplyFlags flags = 0;
         const char *e;
         int x = 0;
 
@@ -253,10 +253,16 @@ static void *thread(void *arg) {
         assert_se(varlink_set_allow_fd_passing_input(c, true) >= 0);
         assert_se(varlink_set_allow_fd_passing_output(c, true) >= 0);
 
-        assert_se(varlink_collect(c, "io.test.DoSomethingMore", i, &j, &error_id, &flags) >= 0);
+        /* Test that client is able to perform two sequential varlink_collect calls if first resulted in an error */
+        assert_se(json_build(&wrong, JSON_BUILD_OBJECT(JSON_BUILD_PAIR("a", JSON_BUILD_INTEGER(88)),
+                                                       JSON_BUILD_PAIR("c", JSON_BUILD_INTEGER(99)))) >= 0);
+        assert_se(varlink_collect(c, "io.test.DoSomethingMore", wrong, &j, &error_id) >= 0);
+        assert_se(strcmp_ptr(error_id, "org.varlink.service.InvalidParameter") == 0);
+
+
+        assert_se(varlink_collect(c, "io.test.DoSomethingMore", i, &j, &error_id) >= 0);
 
         assert_se(!error_id);
-        assert_se(!flags);
         assert_se(json_variant_is_array(j) && !json_variant_is_blank_array(j));
 
         JSON_VARIANT_ARRAY_FOREACH(k, j) {

@@ -434,6 +434,27 @@ grep -qF "myservice.signed.test:1234" "$RUN_OUT"
 grep -qF "10.0.0.20" "$RUN_OUT"
 grep -qF "fd00:dead:beef:cafe::17" "$RUN_OUT"
 grep -qF "authenticated: yes" "$RUN_OUT"
+
+# Test service resolve over Varlink
+run varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveService '{"name":"","type":"_mysvc._tcp","domain":"signed.test"}'
+grep -qF '"services":[{"priority":10,"weight":5,"port":1234,"hostname":"myservice.signed.test","canonicalName":"myservice.signed.test","addresses":[{"ifindex":' "$RUN_OUT"
+grep -qF '"family":10,"address":[253,0,222,173,190,239,202,254,0,0,0,0,0,0,0,23]' "$RUN_OUT"
+grep -qF '"family":2,"address":[10,0,0,20]' "$RUN_OUT"
+grep -qF '}]}],"txt":["This is TXT for myservice"],"canonical":{"name":null,"type":"_mysvc._tcp","domain":"signed.test"},"flags":' "$RUN_OUT"
+
+# without name
+run varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveService '{"type":"_mysvc._tcp","domain":"signed.test"}'
+# without txt (SD_RESOLVE_NO_TXT)
+run varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveService '{"type":"_mysvc._tcp","domain":"signed.test","flags":64}'
+(! grep -qF '"txt"' "$RUN_OUT")
+# without address (SD_RESOLVE_NO_ADDRESS)
+run varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveService '{"type":"_mysvc._tcp","domain":"signed.test","flags":128}'
+(! grep -qF '"addresses"' "$RUN_OUT")
+# without txt and address
+run varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveService '{"type":"_mysvc._tcp","domain":"signed.test","flags":192}'
+(! grep -qF '"txt"' "$RUN_OUT")
+(! grep -qF '"addresses"' "$RUN_OUT")
+
 (! run resolvectl service _invalidsvc._udp signed.test)
 grep -qE "invalidservice\.signed\.test' not found" "$RUN_OUT"
 run resolvectl service _untrustedsvc._udp signed.test

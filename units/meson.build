@@ -268,6 +268,15 @@ units = [
           'conditions' : ['ENABLE_BOOTLOADER'],
         },
         {
+          'file' : 'systemd-bootctl@.service.in',
+          'conditions' : ['ENABLE_BOOTLOADER'],
+        },
+        {
+          'file' : 'systemd-bootctl.socket',
+          'conditions' : ['ENABLE_BOOTLOADER'],
+          'symlinks' : ['sockets.target.wants/'],
+        },
+        {
           'file' : 'systemd-confext.service',
           'conditions' : ['ENABLE_SYSEXT'],
         },
@@ -437,6 +446,10 @@ units = [
         },
         { 'file' : 'systemd-nspawn@.service.in' },
         {
+          'file' : 'systemd-vmspawn@.service.in',
+          'conditions' : ['ENABLE_VMSPAWN'],
+        },
+        {
           'file' : 'systemd-oomd.service.in',
           'conditions' : ['ENABLE_OOMD'],
         },
@@ -518,6 +531,15 @@ units = [
         {
           'file' : 'systemd-pcrlock-firmware-config.service.in',
           'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
+        },
+        {
+          'file' : 'systemd-pcrlock@.service.in',
+          'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
+        },
+        {
+          'file' : 'systemd-pcrlock.socket',
+          'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
+          'symlinks' : ['sockets.target.wants/'],
         },
         {
           'file' : 'systemd-portabled.service.in',

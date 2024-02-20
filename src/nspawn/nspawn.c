@@ -1255,33 +1255,11 @@ static int parse_argv(int argc, char *argv[]) {
                                 arg_uid_shift = 0;
                                 arg_uid_range = UINT32_C(0x10000);
                         } else {
-                                _cleanup_free_ char *buffer = NULL;
-                                const char *range, *shift;
-
                                 /* anything else: User namespacing on, UID range is explicitly configured */
-
-                                range = strchr(optarg, ':');
-                                if (range) {
-                                        buffer = strndup(optarg, range - optarg);
-                                        if (!buffer)
-                                                return log_oom();
-                                        shift = buffer;
-
-                                        range++;
-                                        r = safe_atou32(range, &arg_uid_range);
-                                        if (r < 0)
-                                                return log_error_errno(r, "Failed to parse UID range \"%s\": %m", range);
-                                } else
-                                        shift = optarg;
-
-                                r = parse_uid(shift, &arg_uid_shift);
+                                r = parse_userns_uid_range(optarg, &arg_uid_shift, &arg_uid_range);
                                 if (r < 0)
-                                        return log_error_errno(r, "Failed to parse UID \"%s\": %m", optarg);
-
+                                        return r;
                                 arg_userns_mode = USER_NAMESPACE_FIXED;
-
-                                if (!userns_shift_range_valid(arg_uid_shift, arg_uid_range))
-                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "UID range cannot be empty or go beyond " UID_FMT ".", UID_INVALID);
                         }
 
                         arg_settings_mask |= SETTING_USERNS;
@@ -3953,7 +3931,7 @@ static int outer_child(
 
                 dirs[i] = NULL;
 
-                r = remount_idmap(dirs, arg_uid_shift, arg_uid_range, UID_INVALID, REMOUNT_IDMAPPING_HOST_ROOT);
+                r = remount_idmap(dirs, arg_uid_shift, arg_uid_range, UID_INVALID, UID_INVALID, REMOUNT_IDMAPPING_HOST_ROOT);
                 if (r == -EINVAL || ERRNO_IS_NEG_NOT_SUPPORTED(r)) {
                         /* This might fail because the kernel or file system doesn't support idmapping. We
                          * can't really distinguish this nicely, nor do we have any guarantees about the
@@ -4449,6 +4427,22 @@ static int setup_notify_parent(sd_event *event, int fd, pid_t *inner_child_pid, 
         (void) sd_event_source_set_description(*notify_event_source, "nspawn-notify");
 
         return 0;
+}
+
+static void set_window_title(PTYForward *f) {
+        _cleanup_free_ char *hn = NULL, *dot = NULL;
+
+        assert(f);
+
+        (void) gethostname_strict(&hn);
+
+        if (emoji_enabled())
+                dot = strjoin(special_glyph(SPECIAL_GLYPH_BLUE_CIRCLE), " ");
+
+        if (hn)
+                (void) pty_forward_set_titlef(f, "%sContainer %s on %s", strempty(dot), arg_machine, hn);
+        else
+                (void) pty_forward_set_titlef(f, "%sContainer %s", strempty(dot), arg_machine);
 }
 
 static int merge_settings(Settings *settings, const char *path) {
@@ -5383,6 +5377,7 @@ static int run_container(
                         } else if (!isempty(arg_background))
                                 (void) pty_forward_set_background_color(forward, arg_background);
 
+                        set_window_title(forward);
                         break;
 
                 default:

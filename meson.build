@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
 project('systemd', 'c',
-        version : '255',
+        version : files('meson.version'),
         license : 'LGPLv2+',
         default_options: [
                 'c_std=gnu11',
@@ -18,8 +18,9 @@ libudev_version = '1.7.8'
 
 conf = configuration_data()
 conf.set_quoted('PROJECT_URL', 'https://systemd.io/')
-conf.set('PROJECT_VERSION', meson.project_version(),
+conf.set('PROJECT_VERSION', meson.project_version().split('~')[0],
          description : 'Numerical project version (used where a simple number is expected)')
+conf.set_quoted('PROJECT_VERSION_FULL', meson.project_version(), description : 'Full project version')
 
 # This is to be used instead of meson.source_root(), as the latter will return
 # the wrong result when systemd is being built as a meson subproject
@@ -313,7 +314,7 @@ meson_build_sh = find_program('tools/meson-build.sh')
 want_tests = get_option('tests')
 slow_tests = want_tests != 'false' and get_option('slow-tests')
 fuzz_tests = want_tests != 'false' and get_option('fuzz-tests')
-install_tests = get_option('install-tests')
+install_tests = want_tests != 'false' and get_option('install-tests')
 
 if add_languages('cpp', native : false, required : fuzzer_build)
         #  Used only for tests
@@ -699,8 +700,6 @@ foreach prog : progs
         name = prog.length() > 2 ? prog[2] : prog[0].to_upper()
         conf.set_quoted(name, path)
 endforeach
-
-conf.set_quoted('TELINIT', get_option('telinit-path'))
 
 if run_command(ln, '--relative', '--help', check : false).returncode() != 0
         error('ln does not support --relative (added in coreutils 8.16)')
@@ -1260,7 +1259,8 @@ foreach ident : ['crypt_set_metadata_size',
                  'crypt_token_max',
                  'crypt_reencrypt_init_by_passphrase',
                  'crypt_reencrypt',
-                 'crypt_set_data_offset']
+                 'crypt_set_data_offset',
+                 'crypt_set_keyring_to_link']
         have_ident = have and cc.has_function(
                 ident,
                 prefix : '#include <libcryptsetup.h>',
@@ -1858,13 +1858,12 @@ version_h = vcs_tag(
         output : 'version.h',
         command: [project_source_root / 'tools/meson-vcs-tag.sh',
                   project_source_root,
-                  meson.project_version(),
                   version_tag,
                  ])
 
 shared_lib_tag = get_option('shared-lib-tag')
 if shared_lib_tag == ''
-        shared_lib_tag = meson.project_version()
+        shared_lib_tag = meson.project_version().split('~')[0]
 endif
 
 #####################################################################
@@ -2558,11 +2557,17 @@ foreach exec : public_programs
                      args : exec.full_path(),
                      depends: exec)
 
+                version = meson.project_version()
+                if name == 'udevadm'
+                        # For compatibility reasons we can't use the full version in udevadm.
+                        version = version.split('~')[0]
+                endif
+
                 test('check-version-' + name,
                      check_version,
                      suite : 'dist',
                      args : [exec.full_path(),
-                             meson.project_version()],
+                             version],
                      depends: exec)
         endif
 endforeach
