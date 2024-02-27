@@ -6,6 +6,7 @@
 #include "sd-bus.h"
 
 #include "alloc-util.h"
+#include "build-path.h"
 #include "bus-common-errors.h"
 #include "bus-get-properties.h"
 #include "bus-log-control-api.h"
@@ -475,8 +476,10 @@ static int transfer_start(Transfer *t) {
                         cmd[k++] = t->local;
                 cmd[k] = NULL;
 
-                execv(cmd[0], (char * const *) cmd);
-                log_error_errno(errno, "Failed to execute %s tool: %m", cmd[0]);
+                assert(k < ELEMENTSOF(cmd));
+
+                r = invoke_callout_binary(cmd[0], (char * const *) cmd);
+                log_error_errno(r, "Failed to execute %s tool: %m", cmd[0]);
                 _exit(EXIT_FAILURE);
         }
 
@@ -1371,7 +1374,7 @@ static int run(int argc, char *argv[]) {
 
         umask(0022);
 
-        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGCHLD, SIGTERM, SIGINT, SIGRTMIN+18, -1) >= 0);
+        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGCHLD, SIGTERM, SIGINT, SIGRTMIN+18) >= 0);
 
         r = manager_new(&m);
         if (r < 0)

@@ -1538,7 +1538,7 @@ int server_process_datagram(
                 if (n > 0 && n_fds == 0)
                         server_process_native_message(s, s->buffer, n, ucred, tv, label, label_len);
                 else if (n == 0 && n_fds == 1)
-                        server_process_native_file(s, fds[0], ucred, tv, label, label_len);
+                        (void) server_process_native_file(s, fds[0], ucred, tv, label, label_len);
                 else if (n_fds > 0)
                         log_ratelimit_warning(JOURNAL_LOG_RATELIMIT,
                                               "Got too many file descriptors via native socket. Ignoring.");
@@ -1727,7 +1727,7 @@ static int server_setup_signals(Server *s) {
 
         assert(s);
 
-        assert_se(sigprocmask_many(SIG_SETMASK, NULL, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGRTMIN+1, SIGRTMIN+18, -1) >= 0);
+        assert_se(sigprocmask_many(SIG_SETMASK, NULL, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGRTMIN+1, SIGRTMIN+18) >= 0);
 
         r = sd_event_add_signal(s->event, &s->sigusr1_event_source, SIGUSR1, dispatch_sigusr1, s);
         if (r < 0)

@@ -1618,12 +1618,12 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
 
                 output = check_output('ip -d link show test1')
                 print(output)
-                self.assertRegex(output, ' mtu 2000 ')
+                self.assertIn(' mtu 2000 ', output)
 
                 output = check_output('ip -d link show macvlan99')
                 print(output)
-                self.assertRegex(output, ' mtu 2000 ')
-                self.assertRegex(output, 'macvlan mode ' + mode + ' ')
+                self.assertIn(' mtu 2000 ', output)
+                self.assertIn(f' macvlan mode {mode} ', output)
 
                 remove_link('test1')
                 time.sleep(1)
@@ -1634,12 +1634,14 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
 
                 output = check_output('ip -d link show test1')
                 print(output)
-                self.assertRegex(output, ' mtu 2000 ')
+                self.assertIn(' mtu 2000 ', output)
 
                 output = check_output('ip -d link show macvlan99')
                 print(output)
-                self.assertRegex(output, ' mtu 2000 ')
-                self.assertRegex(output, 'macvlan mode ' + mode + ' ')
+                self.assertIn(' mtu 2000 ', output)
+                self.assertIn(f' macvlan mode {mode} ', output)
+                self.assertIn(' bcqueuelen 1234 ', output)
+                self.assertIn(' bclim 2147483647 ', output)
 
     @expectedFailureIfModuleIsNotAvailable('ipvlan')
     def test_ipvlan(self):
@@ -5220,6 +5222,9 @@ class NetworkdRATests(unittest.TestCase, Utilities):
         self.setup_nftset('ifindex', 'iface_index')
         start_networkd()
         self.wait_online('veth99:routable', 'veth-peer:degraded')
+
+        # IPv6SendRA=yes implies IPv6Forwarding.
+        self.check_ipv6_sysctl_attr('veth-peer', 'forwarding', '1')
 
         output = resolvectl('dns', 'veth99')
         print(output)

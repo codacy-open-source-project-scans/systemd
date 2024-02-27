@@ -936,23 +936,30 @@ static int event_log_load_firmware(EventLog *el) {
                 assert(event->digests.count == n_algorithms);
 
                 for (size_t i = 0; i < n_algorithms; i++, ha = ha_next) {
-                        ha_next = (const uint8_t*) ha + offsetof(TPMT_HA, digest) + algorithms[i].digestSize;
-
                         /* The TPMT_HA is not aligned in the record, hence read the hashAlg field via an unaligned read */
                         assert_cc(__builtin_types_compatible_p(uint16_t, typeof(TPMI_ALG_HASH)));
                         uint16_t hash_alg = unaligned_read_ne16((const uint8_t*) ha + offsetof(TPMT_HA, hashAlg));
 
-                        if (hash_alg != algorithms[i].algorithmId)
-                                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG), "Hash algorithms in event log record don't match log.");
+                        /* On some systems (some HyperV?) the order of hash algorithms announced in the
+                         * header does not match the order in the records. Let's hence search for the right
+                         * mapping */
+                        size_t j;
+                        for (j = 0; j < n_algorithms; j++)
+                                if (hash_alg == algorithms[j].algorithmId)
+                                        break;
+                        if (j >= n_algorithms)
+                                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG), "Hash algorithms in event log record not among those advertised by log header.");
 
-                        if (!tpm2_hash_alg_to_string(algorithms[i].algorithmId))
+                        ha_next = (const uint8_t*) ha + offsetof(TPMT_HA, digest) + algorithms[j].digestSize;
+
+                        if (!tpm2_hash_alg_to_string(hash_alg))
                                 continue;
 
                         r = event_log_record_add_bank(
                                         record,
-                                        algorithms[i].algorithmId,
+                                        hash_alg,
                                         (const uint8_t*) ha + offsetof(TPMT_HA, digest),
-                                        algorithms[i].digestSize,
+                                        algorithms[j].digestSize,
                                         /* ret= */ NULL);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to add bank to event log record: %m");
@@ -4444,12 +4451,14 @@ static int make_policy(bool force, bool recovery_pin) {
                 if (r == 0) {
                         _cleanup_(strv_free_erasep) char **l = NULL;
 
+                        AskPasswordRequest req = {
+                                .message = "Recovery PIN",
+                                .id = "pcrlock-recovery-pin",
+                                .credential = "pcrlock.recovery-pin",
+                        };
+
                         r = ask_password_auto(
-                                        "Recovery PIN",
-                                        /* icon= */ NULL,
-                                        /* id= */ "pcrlock-recovery-pin",
-                                        /* key_name= */ NULL,
-                                        /* credential_name= */ "systemd-pcrlock.recovery-pin",
+                                        &req,
                                         /* until= */ 0,
                                         /* flags= */ 0,
                                         &l);

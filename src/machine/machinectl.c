@@ -1130,7 +1130,7 @@ static int copy_files(int argc, char *argv[], void *userdata) {
                 return bus_log_create_error(r);
 
         if (arg_force) {
-                r = sd_bus_message_append(m, "t", MACHINE_COPY_REPLACE);
+                r = sd_bus_message_append(m, "t", (uint64_t) MACHINE_COPY_REPLACE);
                 if (r < 0)
                         return bus_log_create_error(r);
         }
@@ -1201,7 +1201,7 @@ static int process_forward(sd_event *event, PTYForward **forward, int master, PT
         assert(master >= 0);
         assert(name);
 
-        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGWINCH, SIGTERM, SIGINT, -1) >= 0);
+        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGWINCH, SIGTERM, SIGINT) >= 0);
 
         if (!arg_quiet) {
                 if (streq(name, ".host"))
@@ -1952,7 +1952,7 @@ static int transfer_image_common(sd_bus *bus, sd_bus_message *m) {
         if (r < 0)
                 return bus_log_parse_error(r);
 
-        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGTERM, SIGINT, -1) >= 0);
+        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGTERM, SIGINT) >= 0);
 
         if (!arg_quiet)
                 log_info("Enqueued transfer job %u. Press C-c to continue download in background.", id);

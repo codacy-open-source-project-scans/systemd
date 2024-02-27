@@ -1610,6 +1610,8 @@ static void set_window_title(PTYForward *f) {
                 (void) pty_forward_set_titlef(f, "%s%s on %s", strempty(dot), cl, arg_host ?: hn);
         else
                 (void) pty_forward_set_titlef(f, "%s%s", strempty(dot), cl);
+
+        (void) pty_forward_set_title_prefix(f, dot);
 }
 
 static int start_transient_service(sd_bus *bus) {
@@ -1749,9 +1751,9 @@ static int start_transient_service(sd_bus *bus) {
                         return log_error_errno(r, "Failed to get event loop: %m");
 
                 if (master >= 0) {
-                        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGWINCH, SIGTERM, SIGINT, -1) >= 0);
-                        (void) sd_event_add_signal(c.event, NULL, SIGINT, NULL, NULL);
-                        (void) sd_event_add_signal(c.event, NULL, SIGTERM, NULL, NULL);
+                        assert_se(sigprocmask_many(SIG_BLOCK, /* old_sigset=*/ NULL, SIGWINCH) >= 0);
+
+                        (void) sd_event_set_signal_exit(c.event, true);
 
                         if (!arg_quiet)
                                 log_info("Press ^] three times within 1s to disconnect TTY.");

@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 
 #include "macro.h"
+#include "missing_fcntl.h"
 #include "stdio-util.h"
 
 /* maximum length of fdname */
@@ -111,7 +112,10 @@ static inline int make_null_stdio(void) {
 
 int fd_reopen(int fd, int flags);
 int fd_reopen_condition(int fd, int flags, int mask, int *ret_new_fd);
+
 int fd_is_opath(int fd);
+int fd_verify_safe_flags(int fd);
+
 int read_nr_open(void);
 int fd_get_diskseq(int fd, uint64_t *ret);
 

@@ -63,22 +63,22 @@ static inline const char *ovmf_config_vars_format(const OvmfConfig *c) {
 OvmfConfig* ovmf_config_free(OvmfConfig *ovmf_config);
 DEFINE_TRIVIAL_CLEANUP_FUNC(OvmfConfig*, ovmf_config_free);
 
-typedef enum QemuNetworkStack {
-        QEMU_NET_TAP,
-        QEMU_NET_USER,
-        QEMU_NET_NONE,
-        _QEMU_NET_MAX,
-        _QEMU_NET_INVALID = -EINVAL,
-} QemuNetworkStack;
+typedef enum NetworkStack {
+        NETWORK_STACK_TAP,
+        NETWORK_STACK_USER,
+        NETWORK_STACK_NONE,
+        _NETWORK_STACK_MAX,
+        _NETWORK_STACK_INVALID = -EINVAL,
+} NetworkStack;
 
-static const char* const qemu_network_stack_table[_QEMU_NET_MAX] = {
-        [QEMU_NET_TAP]  = "tap",
-        [QEMU_NET_USER] = "user",
-        [QEMU_NET_NONE] = "none",
+static const char* const network_stack_table[_NETWORK_STACK_MAX] = {
+        [NETWORK_STACK_TAP]  = "tap",
+        [NETWORK_STACK_USER] = "user",
+        [NETWORK_STACK_NONE] = "none",
 };
 
-const char* qemu_network_stack_to_string(QemuNetworkStack type) _const_;
-QemuNetworkStack qemu_network_stack_from_string(const char *s) _pure_;
+const char* network_stack_to_string(NetworkStack type) _const_;
+NetworkStack network_stack_from_string(const char *s) _pure_;
 
 int qemu_check_kvm_support(void);
 int qemu_check_vsock_support(void);
@@ -87,3 +87,5 @@ int load_ovmf_config(const char *path, OvmfConfig **ret);
 int find_ovmf_config(int search_sb, OvmfConfig **ret);
 int find_qemu_binary(char **ret_qemu_binary);
 int vsock_fix_child_cid(int vsock_fd, unsigned *machine_cid, const char *machine);
+
+char* escape_qemu_value(const char *s);

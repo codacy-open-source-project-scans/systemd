@@ -3,7 +3,6 @@
 #include "fd-util.h"
 #include "home-util.h"
 #include "homed-bus.h"
-#include "missing_fcntl.h"
 #include "stat-util.h"
 #include "strv.h"
 
@@ -90,7 +89,7 @@ int bus_message_read_blobs(sd_bus_message *m, Hashmap **ret, sd_bus_error *error
                 _cleanup_free_ char *filename = NULL;
                 _cleanup_close_ int fd = -EBADF;
                 const char *_filename = NULL;
-                int _fd, flags;
+                int _fd;
 
                 r = sd_bus_message_read(m, "{sh}", &_filename, &_fd);
                 if (r < 0)
@@ -112,16 +111,14 @@ int bus_message_read_blobs(sd_bus_message *m, Hashmap **ret, sd_bus_error *error
 
                 r = fd_verify_regular(fd);
                 if (r < 0)
-                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "FD for %s is not a regular file", filename);
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "FD for '%s' is not a regular file", filename);
 
-                flags = fcntl(fd, F_GETFL);
-                if (flags < 0)
-                        return -errno;
-
-                /* Refuse fds w/ unexpected flags set. In particular, we don't want to permit O_PATH FDs, since
-                 * those don't actually guarantee that the client has access to the file. */
-                if ((flags & ~(O_ACCMODE|RAW_O_LARGEFILE)) != 0)
-                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "FD for %s has unexpected flags set", filename);
+                r = fd_verify_safe_flags(fd);
+                if (r == -EREMOTEIO)
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS,
+                                                 "FD for '%s' has unexpected flags set", filename);
+                if (r < 0)
+                        return r;
 
                 r = hashmap_put(blobs, filename, FD_TO_PTR(fd));
                 if (r < 0)
