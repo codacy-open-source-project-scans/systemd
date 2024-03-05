@@ -801,7 +801,7 @@ static int context_ensure_layout(Context *c) {
         if (!entry_token_path)
                 return log_oom();
 
-        r = is_dir_full(c->rfd, entry_token_path, /* follow = */ false);
+        r = is_dir_at(c->rfd, entry_token_path, /* follow = */ false);
         if (r < 0 && r != -ENOENT)
                 return log_error_errno(r, "Failed to check if '%s' is a directory: %m", entry_token_path);
         if (r > 0) {
@@ -1699,7 +1699,8 @@ static int run(int argc, char* argv[]) {
                                 DISSECT_IMAGE_GENERIC_ROOT |
                                 DISSECT_IMAGE_REQUIRE_ROOT |
                                 DISSECT_IMAGE_RELAX_VAR_CHECK |
-                                DISSECT_IMAGE_VALIDATE_OS,
+                                DISSECT_IMAGE_VALIDATE_OS |
+                                DISSECT_IMAGE_ALLOW_USERSPACE_VERITY,
                                 &mounted_dir,
                                 /* ret_dir_fd= */ NULL,
                                 &loop_device);

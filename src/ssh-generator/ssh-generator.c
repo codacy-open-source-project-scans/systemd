@@ -184,10 +184,11 @@ static int add_vsock_socket(
         assert(dest);
         assert(generated_sshd_template_unit);
 
-        Virtualization v = detect_vm();
+        Virtualization v = detect_virtualization();
         if (v < 0)
                 return log_error_errno(v, "Failed to detect if we run in a VM: %m");
-        if (v == VIRTUALIZATION_NONE) {
+        if (!VIRTUALIZATION_IS_VM(v)) {
+                /* NB: if we are running in a container inside a VM, then we'll *not* do AF_VSOCK stuff */
                 log_debug("Not running in a VM, not listening on AF_VSOCK.");
                 return 0;
         }
@@ -207,8 +208,14 @@ static int add_vsock_socket(
         /* Determine the local CID so that we can log it to help users to connect to this VM */
         unsigned local_cid;
         r = vsock_get_local_cid(&local_cid);
-        if (r < 0)
+        if (r < 0) {
+                if (ERRNO_IS_DEVICE_ABSENT(r)) {
+                        log_debug("Not creating AF_VSOCK ssh listener, since /dev/vsock is not available (even though AF_VSOCK is).");
+                        return 0;
+                }
+
                 return log_error_errno(r, "Failed to query local AF_VSOCK CID: %m");
+        }
 
         r = make_sshd_template_unit(
                         dest,

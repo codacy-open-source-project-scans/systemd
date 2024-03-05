@@ -129,14 +129,6 @@ All tools:
 * `$SYSTEMD_VERITY_SHARING=0` — if set, sharing dm-verity devices by
   using a stable `<ROOTHASH>-verity` device mapper name will be disabled.
 
-* `$SYSTEMD_OPENSSL_KEY_LOADER`— when using OpenSSL to load a key via an engine
-  or a provider, can be used to force the usage of one or the other interface.
-  Set to 'engine' to force the usage of the old engine API, and to 'provider'
-  force the usage of the new provider API. If unset, the provider will be tried
-  first and the engine as a fallback if that fails. Providers are the new OpenSSL
-  3 API, but there are very few if any in a production-ready state, so engines
-  are still needed.
-
 `systemctl`:
 
 * `$SYSTEMCTL_FORCE_BUS=1` — if set, do not connect to PID 1's private D-Bus
@@ -252,7 +244,7 @@ All tools:
   when determining stable network interface names. This may be used to revert
   to naming schemes of older udev versions, in order to provide more stable
   naming across updates. This environment variable takes precedence over the
-  kernel command line option `net.naming-scheme=`, except if the value is
+  kernel command line option `net.naming_scheme=`, except if the value is
   prefixed with `:` in which case the kernel command line option takes
   precedence, if it is specified as well.
 
@@ -487,6 +479,12 @@ disk images with `--image=` or similar:
   `LO_FLAGS_DIRECT_IO` (i.e. direct IO + asynchronous IO) on loopback block
   devices when opening them. Defaults to on, set this to "0" to disable this
   feature.
+
+* `$SYSTEMD_ALLOW_USERSPACE_VERITY` — takes a boolean, which controls whether
+  to consider the userspace Verity public key store in `/etc/verity.d/` (and
+  related directories) to authenticate signatures on Verity hashes of disk
+  images. Defaults to true, i.e. userspace signature validation is allowed. If
+  false, authentication can be done only via the kernel's internal keyring.
 
 `systemd-cryptsetup`:
 

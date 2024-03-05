@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
+#include "icmp6-packet.h"
 #include "time-util.h"
 
 /* RFC 8781: PREF64 or (NAT64 prefix) */
@@ -25,7 +26,14 @@ struct nd_opt_prefix64_info {
         uint8_t length;
         uint16_t lifetime_and_plc;
         uint8_t prefix[12];
-} __attribute__((__packed__));
+} _packed_;
 
 int pref64_plc_to_prefix_length(uint16_t plc, uint8_t *ret);
 int pref64_prefix_length_to_plc(uint8_t prefixlen, uint8_t *ret);
+
+int ndisc_option_parse(
+                ICMP6Packet *p,
+                size_t offset,
+                uint8_t *ret_type,
+                size_t *ret_len,
+                const uint8_t **ret_opt);
