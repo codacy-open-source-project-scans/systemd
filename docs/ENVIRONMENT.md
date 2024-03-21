@@ -348,11 +348,16 @@ All tools:
   `systemd-gpt-auto-generator` to ensure the root partition is mounted writable
   in accordance to the GPT partition flags.
 
-`systemd-firstboot` and `localectl`:
+`systemd-firstboot`, `localectl`, and `systemd-localed`:
 
 * `$SYSTEMD_LIST_NON_UTF8_LOCALES=1` — if set, non-UTF-8 locales are listed among
   the installed ones. By default non-UTF-8 locales are suppressed from the
   selection, since we are living in the 21st century.
+
+* `$SYSTEMD_KEYMAP_DIRECTORIES=` — takes a colon (`:`) separated list of keymap
+  directories. The directories must be absolute and normalized. If unset, the
+  default keymap directories (/usr/share/keymaps/, /usr/share/kbd/keymaps/, and
+  /usr/lib/kbd/keymaps/) will be used.
 
 `systemd-resolved`:
 
@@ -617,6 +622,13 @@ SYSTEMD_HOME_DEBUG_SUFFIX=foo \
 * `$SYSTEMD_FIREWALL_BACKEND` – takes a string, either `iptables` or
   `nftables`. Selects the firewall backend to use. If not specified tries to
   use `nftables` and falls back to `iptables` if that's not available.
+
+`systemd-networkd`:
+
+* `$SYSTEMD_NETWORK_PERSISTENT_STORAGE_READY` – takes a boolean. If true,
+  systemd-networkd tries to open the persistent storage on start. To make this
+  work, ProtectSystem=strict in systemd-networkd.service needs to be downgraded
+  or disabled.
 
 `systemd-storagetm`:
 

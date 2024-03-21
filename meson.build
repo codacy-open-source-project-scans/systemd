@@ -66,9 +66,9 @@ summary({'build mode' : get_option('mode')})
 #####################################################################
 
 # Try to install the git pre-commit hook
-add_git_hook_sh = find_program('tools/add-git-hook.sh', required : false)
-if add_git_hook_sh.found()
-        git_hook = run_command(add_git_hook_sh, check : false)
+git_setup_sh = find_program('tools/git-setup.sh', required : false)
+if git_setup_sh.found()
+        git_hook = run_command(git_setup_sh, check : false)
         if git_hook.returncode() == 0
                 message(git_hook.stdout().strip())
         endif
@@ -738,14 +738,15 @@ if not cc.has_header('sys/capability.h')
         error('POSIX caps headers not found')
 endif
 foreach header : ['crypt.h',
+                  'linux/ioprio.h',
                   'linux/memfd.h',
+                  'linux/time_types.h',
                   'linux/vm_sockets.h',
                   'sys/auxv.h',
+                  'sys/sdt.h',
                   'threads.h',
                   'valgrind/memcheck.h',
                   'valgrind/valgrind.h',
-                  'linux/time_types.h',
-                  'sys/sdt.h',
                  ]
 
         conf.set10('HAVE_' + header.underscorify().to_upper(),
@@ -1853,20 +1854,15 @@ endif
 conf.set_quoted('VERSION_TAG', version_tag)
 
 vcs_tag = get_option('vcs-tag')
-if vcs_tag and fs.is_dir(project_source_root / '.git')
-        version_h = vcs_tag(
-                input : 'src/version/version.h.in',
-                output : 'version.h',
-                fallback : '',
-                command : ['sh', '-c', 'echo "-g$(git -C . describe --abbrev=7 --match="" --always --dirty=^)"'],
-        )
-else
-        version_h = configure_file(
-                input : 'src/version/version.h.in',
-                output : 'version.h',
-                configuration : configuration_data({'VCS_TAG' : ''}),
-        )
-endif
+command = ['sh', '-c',
+           vcs_tag and fs.exists(project_source_root / '.git') ?
+                   'echo "-g$(git -C . describe --abbrev=7 --match="" --always --dirty=^)"' : ':']
+version_h = vcs_tag(
+        input : 'src/version/version.h.in',
+        output : 'version.h',
+        fallback : '',
+        command : command,
+)
 
 shared_lib_tag = get_option('shared-lib-tag')
 if shared_lib_tag == ''

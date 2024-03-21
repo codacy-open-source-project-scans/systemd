@@ -2678,12 +2678,14 @@ void unit_notify(Unit *u, UnitActiveState os, UnitActiveState ns, bool reload_su
 
                         unit_emit_audit_start(u);
                         manager_send_unit_plymouth(m, u);
+                        manager_send_unit_supervisor(m, u, /* active= */ true);
                 }
 
                 if (UNIT_IS_INACTIVE_OR_FAILED(ns) && !UNIT_IS_INACTIVE_OR_FAILED(os)) {
                         /* This unit just stopped/failed. */
 
                         unit_emit_audit_stop(u, ns);
+                        manager_send_unit_supervisor(m, u, /* active= */ false);
                         unit_log_resources(u);
                 }
 
@@ -5336,7 +5338,7 @@ int unit_set_exec_params(Unit *u, ExecParameters *p) {
 
         p->runtime_scope = u->manager->runtime_scope;
 
-        r = strdup_or_null(manager_get_confirm_spawn(u->manager), &p->confirm_spawn);
+        r = strdup_to(&p->confirm_spawn, manager_get_confirm_spawn(u->manager));
         if (r < 0)
                 return r;
 

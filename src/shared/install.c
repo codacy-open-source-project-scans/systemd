@@ -1941,7 +1941,7 @@ static int install_info_symlink_alias(
         assert(config_path);
 
         STRV_FOREACH(s, info->aliases) {
-                _cleanup_free_ char *alias_path = NULL, *dst = NULL, *dst_updated = NULL;
+                _cleanup_free_ char *alias_path = NULL, *alias_target = NULL, *dst = NULL, *dst_updated = NULL;
 
                 r = install_name_printf(scope, info, *s, &dst);
                 if (r < 0) {
@@ -1960,6 +1960,18 @@ static int install_info_symlink_alias(
                 if (!alias_path)
                         return -ENOMEM;
 
+                r = in_search_path(lp, info->path);
+                if (r < 0)
+                        return r;
+                if (r == 0) {
+                        /* The unit path itself is outside of the search path. To
+                         * correctly apply the alias, we need the alias symlink to
+                         * point to the symlink that was created in the search path. */
+                        alias_target = path_join(config_path, info->name);
+                        if (!alias_target)
+                                return -ENOMEM;
+                }
+
                 bool broken;
                 r = chase(alias_path, lp->root_dir, CHASE_NONEXISTENT, /* ret_path = */ NULL, /* ret_fd = */ NULL);
                 if (r < 0 && r != -ENOENT) {
@@ -1968,7 +1980,7 @@ static int install_info_symlink_alias(
                 }
                 broken = r == 0; /* symlink target does not exist? */
 
-                RET_GATHER(ret, create_symlink(lp, info->path, alias_path, force || broken, changes, n_changes));
+                RET_GATHER(ret, create_symlink(lp, alias_target ?: info->path, alias_path, force || broken, changes, n_changes));
         }
 
         return ret;
@@ -3030,17 +3042,16 @@ int unit_file_set_default(
 int unit_file_get_default(
                 RuntimeScope scope,
                 const char *root_dir,
-                char **name) {
+                char **ret) {
 
         _cleanup_(lookup_paths_done) LookupPaths lp = {};
         _cleanup_(install_context_done) InstallContext ctx = { .scope = scope };
         InstallInfo *info;
-        char *n;
         int r;
 
         assert(scope >= 0);
         assert(scope < _RUNTIME_SCOPE_MAX);
-        assert(name);
+        assert(ret);
 
         r = lookup_paths_init(&lp, scope, 0, root_dir);
         if (r < 0)
@@ -3051,12 +3062,7 @@ int unit_file_get_default(
         if (r < 0)
                 return r;
 
-        n = strdup(info->name);
-        if (!n)
-                return -ENOMEM;
-
-        *name = n;
-        return 0;
+        return strdup_to(ret, info->name);
 }
 
 int unit_file_lookup_state(
@@ -3209,11 +3215,9 @@ int unit_file_exists_full(RuntimeScope scope, const LookupPaths *lp, const char 
         if (ret_path) {
                 assert(info);
 
-                _cleanup_free_ char *p = strdup(info->path);
-                if (!p)
-                        return -ENOMEM;
-
-                *ret_path = TAKE_PTR(p);
+                r = strdup_to(ret_path, info->path);
+                if (r < 0)
+                        return r;
         }
 
         return 1;

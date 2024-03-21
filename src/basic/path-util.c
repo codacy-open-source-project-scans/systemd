@@ -1094,7 +1094,6 @@ int path_extract_filename(const char *path, char **ret) {
 }
 
 int path_extract_directory(const char *path, char **ret) {
-        _cleanup_free_ char *a = NULL;
         const char *c, *next = NULL;
         int r;
 
@@ -1118,14 +1117,10 @@ int path_extract_directory(const char *path, char **ret) {
                 if (*path != '/') /* filename only */
                         return -EDESTADDRREQ;
 
-                a = strdup("/");
-                if (!a)
-                        return -ENOMEM;
-                *ret = TAKE_PTR(a);
-                return 0;
+                return strdup_to(ret, "/");
         }
 
-        a = strndup(path, next - path);
+        _cleanup_free_ char *a = strndup(path, next - path);
         if (!a)
                 return -ENOMEM;
 
@@ -1334,6 +1329,20 @@ bool dot_or_dot_dot(const char *path) {
                 return false;
 
         return path[2] == 0;
+}
+
+bool path_implies_directory(const char *path) {
+
+        /* Sometimes, if we look at a path we already know it must refer to a directory, because it is
+         * suffixed with a slash, or its last component is "." or ".." */
+
+        if (!path)
+                return false;
+
+        if (dot_or_dot_dot(path))
+                return true;
+
+        return ENDSWITH_SET(path, "/", "/.", "/..");
 }
 
 bool empty_or_root(const char *path) {
