@@ -37,6 +37,7 @@
 #include "constants.h"
 #include "core-varlink.h"
 #include "creds-util.h"
+#include "daemon-util.h"
 #include "dbus-job.h"
 #include "dbus-manager.h"
 #include "dbus-unit.h"
@@ -3693,7 +3694,17 @@ static void manager_notify_finished(Manager *m) {
         if (MANAGER_IS_TEST_RUN(m))
                 return;
 
-        if (MANAGER_IS_SYSTEM(m) && detect_container() <= 0) {
+        if (MANAGER_IS_SYSTEM(m) && dual_timestamp_is_set(&m->timestamps[MANAGER_TIMESTAMP_SOFTREBOOT_START])) {
+                /* The soft-reboot case, where we only report data for the last reboot */
+                firmware_usec = loader_usec = initrd_usec = kernel_usec = 0;
+                total_usec = userspace_usec = m->timestamps[MANAGER_TIMESTAMP_FINISH].monotonic - m->timestamps[MANAGER_TIMESTAMP_SOFTREBOOT_START].monotonic;
+
+                log_struct(LOG_INFO,
+                           "MESSAGE_ID=" SD_MESSAGE_STARTUP_FINISHED_STR,
+                           "USERSPACE_USEC="USEC_FMT, userspace_usec,
+                           LOG_MESSAGE("Soft-reboot finished in %s.",
+                                       FORMAT_TIMESPAN(total_usec, USEC_PER_MSEC)));
+        } else if (MANAGER_IS_SYSTEM(m) && detect_container() <= 0) {
                 char buf[FORMAT_TIMESPAN_MAX + STRLEN(" (firmware) + ") + FORMAT_TIMESPAN_MAX + STRLEN(" (loader) + ")]
                         = {};
                 char *p = buf;
@@ -3879,9 +3890,7 @@ void manager_send_reloading(Manager *m) {
         assert(m);
 
         /* Let whoever invoked us know that we are now reloading */
-        (void) sd_notifyf(/* unset_environment= */ false,
-                          "RELOADING=1\n"
-                          "MONOTONIC_USEC=" USEC_FMT "\n", now(CLOCK_MONOTONIC));
+        (void) notify_reloading_full(/* status = */ NULL);
 
         /* And ensure that we'll send READY=1 again as soon as we are ready again */
         m->ready_sent = false;
@@ -5042,6 +5051,7 @@ static const char *const manager_timestamp_table[_MANAGER_TIMESTAMP_MAX] = {
         [MANAGER_TIMESTAMP_INITRD]                   = "initrd",
         [MANAGER_TIMESTAMP_USERSPACE]                = "userspace",
         [MANAGER_TIMESTAMP_FINISH]                   = "finish",
+        [MANAGER_TIMESTAMP_SOFTREBOOT_START]         = "softreboot-start",
         [MANAGER_TIMESTAMP_SECURITY_START]           = "security-start",
         [MANAGER_TIMESTAMP_SECURITY_FINISH]          = "security-finish",
         [MANAGER_TIMESTAMP_GENERATORS_START]         = "generators-start",

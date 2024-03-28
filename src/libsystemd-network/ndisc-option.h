@@ -3,8 +3,10 @@
 
 #include <inttypes.h>
 #include <net/ethernet.h>
+#include <netinet/icmp6.h>
 #include <netinet/in.h>
 #include <netinet/ip6.h>
+#include <sys/uio.h>
 
 #include "sd-ndisc-protocol.h"
 
@@ -12,6 +14,11 @@
 #include "macro.h"
 #include "set.h"
 #include "time-util.h"
+
+typedef struct sd_ndisc_raw {
+        uint8_t *bytes;
+        size_t length;
+} sd_ndisc_raw;
 
 /* Mostly equivalent to struct nd_opt_prefix_info, but using usec_t. */
 typedef struct sd_ndisc_prefix {
@@ -21,6 +28,11 @@ typedef struct sd_ndisc_prefix {
         usec_t valid_lifetime;
         usec_t preferred_lifetime;
 } sd_ndisc_prefix;
+
+typedef struct sd_ndisc_home_agent {
+        uint16_t preference;
+        usec_t lifetime;
+} sd_ndisc_home_agent;
 
 typedef struct sd_ndisc_route {
         uint8_t preference;
@@ -51,16 +63,18 @@ typedef struct sd_ndisc_option {
         size_t offset;
 
         union {
-                struct ether_addr mac;      /* SD_NDISC_OPTION_SOURCE_LL_ADDRESS or SD_NDISC_OPTION_TARGET_LL_ADDRESS */
-                sd_ndisc_prefix prefix;     /* SD_NDISC_OPTION_PREFIX_INFORMATION */
-                struct ip6_hdr hdr;         /* SD_NDISC_OPTION_REDIRECTED_HEADER */
-                uint32_t mtu;               /* SD_NDISC_OPTION_MTU */
-                sd_ndisc_route route;       /* SD_NDISC_OPTION_ROUTE_INFORMATION */
-                sd_ndisc_rdnss rdnss;       /* SD_NDISC_OPTION_RDNSS */
-                uint64_t extended_flags;    /* SD_NDISC_OPTION_FLAGS_EXTENSION */
-                sd_ndisc_dnssl dnssl;       /* SD_NDISC_OPTION_DNSSL */
-                char *captive_portal;       /* SD_NDISC_OPTION_CAPTIVE_PORTAL */
-                sd_ndisc_prefix64 prefix64; /* SD_NDISC_OPTION_PREF64 */
+                sd_ndisc_raw raw;               /* for testing or unsupported options */
+                struct ether_addr mac;          /* SD_NDISC_OPTION_SOURCE_LL_ADDRESS or SD_NDISC_OPTION_TARGET_LL_ADDRESS */
+                sd_ndisc_prefix prefix;         /* SD_NDISC_OPTION_PREFIX_INFORMATION */
+                struct ip6_hdr hdr;             /* SD_NDISC_OPTION_REDIRECTED_HEADER */
+                uint32_t mtu;                   /* SD_NDISC_OPTION_MTU */
+                sd_ndisc_home_agent home_agent; /* SD_NDISC_OPTION_HOME_AGENT */
+                sd_ndisc_route route;           /* SD_NDISC_OPTION_ROUTE_INFORMATION */
+                sd_ndisc_rdnss rdnss;           /* SD_NDISC_OPTION_RDNSS */
+                uint64_t extended_flags;        /* SD_NDISC_OPTION_FLAGS_EXTENSION */
+                sd_ndisc_dnssl dnssl;           /* SD_NDISC_OPTION_DNSSL */
+                char *captive_portal;           /* SD_NDISC_OPTION_CAPTIVE_PORTAL */
+                sd_ndisc_prefix64 prefix64;     /* SD_NDISC_OPTION_PREF64 */
         };
 } sd_ndisc_option;
 
@@ -101,12 +115,26 @@ int ndisc_option_parse(
 
 int ndisc_parse_options(ICMP6Packet *p, Set **ret_options);
 
-static inline sd_ndisc_option* ndisc_option_get(Set *options, uint8_t type) {
-        return set_get(options, &(sd_ndisc_option) { .type = type, });
+static inline sd_ndisc_option* ndisc_option_get(Set *options, const sd_ndisc_option *p) {
+        return set_get(options, ASSERT_PTR(p));
 }
-
+static inline sd_ndisc_option* ndisc_option_get_by_type(Set *options, uint8_t type) {
+        return ndisc_option_get(options, &(const sd_ndisc_option) { .type = type });
+}
 int ndisc_option_get_mac(Set *options, uint8_t type, struct ether_addr *ret);
 
+static inline void ndisc_option_remove(Set *options, const sd_ndisc_option *p) {
+        ndisc_option_free(set_remove(options, ASSERT_PTR(p)));
+}
+static inline void ndisc_option_remove_by_type(Set *options, uint8_t type) {
+        ndisc_option_remove(options, &(const sd_ndisc_option) { .type = type });
+}
+
+int ndisc_option_add_raw(
+                Set **options,
+                size_t offset,
+                size_t length,
+                const uint8_t *bytes);
 int ndisc_option_add_link_layer_address(
                 Set **options,
                 uint8_t opt,
@@ -128,6 +156,11 @@ int ndisc_option_add_mtu(
                 Set **options,
                 size_t offset,
                 uint32_t mtu);
+int ndisc_option_add_home_agent(
+                Set **options,
+                size_t offset,
+                uint16_t preference,
+                usec_t lifetime);
 int ndisc_option_add_route(
                 Set **options,
                 size_t offset,
@@ -160,3 +193,5 @@ int ndisc_option_add_prefix64(
                 uint8_t prefixlen,
                 const struct in6_addr *prefix,
                 usec_t lifetime);
+
+int ndisc_send(int fd, const struct sockaddr_in6 *dst, const struct icmp6_hdr *hdr, Set *options);
