@@ -194,7 +194,7 @@ TEST(proc) {
         _cleanup_closedir_ DIR *d = NULL;
         int r;
 
-        assert_se(proc_dir_open(&d) >= 0);
+        ASSERT_OK(proc_dir_open(&d));
 
         for (;;) {
                 _cleanup_free_ char *path = NULL, *path_shifted = NULL, *session = NULL, *unit = NULL, *user_unit = NULL, *machine = NULL, *slice = NULL;
@@ -238,7 +238,7 @@ static void test_escape_one(const char *s, const char *expected) {
         assert_se(s);
         assert_se(expected);
 
-        assert_se(cg_escape(s, &b) >= 0);
+        ASSERT_OK(cg_escape(s, &b));
         assert_se(streq(b, expected));
 
         assert_se(streq(cg_unescape(b), s));
@@ -315,7 +315,7 @@ TEST(slice_to_path) {
 static void test_shift_path_one(const char *raw, const char *root, const char *shifted) {
         const char *s = NULL;
 
-        assert_se(cg_shift_path(raw, root, &s) >= 0);
+        ASSERT_OK(cg_shift_path(raw, root, &s));
         assert_se(streq(s, shifted));
 }
 
@@ -329,7 +329,7 @@ TEST(shift_path) {
 TEST(mask_supported, .sd_booted = true) {
         CGroupMask m;
 
-        assert_se(cg_mask_supported(&m) >= 0);
+        ASSERT_OK(cg_mask_supported(&m));
 
         for (CGroupController c = 0; c < _CGROUP_CONTROLLER_MAX; c++)
                 printf("'%s' is supported: %s\n",
@@ -402,7 +402,7 @@ TEST(cg_get_keyed_attribute) {
         }
 
         assert_se(r == -ENOENT);
-        assert_se(val == NULL);
+        ASSERT_NULL(val);
 
         if (access("/sys/fs/cgroup/init.scope/cpu.stat", R_OK) < 0) {
                 log_info_errno(errno, "Skipping most of %s, /init.scope/cpu.stat not accessible: %m", __func__);
@@ -411,7 +411,7 @@ TEST(cg_get_keyed_attribute) {
 
         assert_se(cg_get_keyed_attribute("cpu", "/init.scope", "cpu.stat", STRV_MAKE("no_such_attr"), &val) == -ENXIO);
         assert_se(cg_get_keyed_attribute_graceful("cpu", "/init.scope", "cpu.stat", STRV_MAKE("no_such_attr"), &val) == 0);
-        assert_se(val == NULL);
+        ASSERT_NULL(val);
 
         assert_se(cg_get_keyed_attribute("cpu", "/init.scope", "cpu.stat", STRV_MAKE("usage_usec"), &val) == 0);
         val = mfree(val);

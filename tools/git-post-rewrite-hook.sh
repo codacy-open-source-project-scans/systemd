@@ -1,5 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # SPDX-License-Identifier: LGPL-2.1-or-later
-set -e
 
-mkosi-install systemd udev
+exec git submodule update

@@ -375,31 +375,31 @@ TEST(strjoin) {
 
         actual = strjoin("", "foo", "bar");
         assert_se(streq(actual, "foobar"));
-        mfree(actual);
+        free(actual);
 
         actual = strjoin("foo", "bar", "baz");
         assert_se(streq(actual, "foobarbaz"));
-        mfree(actual);
+        free(actual);
 
         actual = strjoin("foo", "", "bar", "baz");
         assert_se(streq(actual, "foobarbaz"));
-        mfree(actual);
+        free(actual);
 
         actual = strjoin("foo", NULL);
         assert_se(streq(actual, "foo"));
-        mfree(actual);
+        free(actual);
 
         actual = strjoin(NULL, NULL);
         assert_se(streq(actual, ""));
-        mfree(actual);
+        free(actual);
 
         actual = strjoin(NULL, "foo");
         assert_se(streq(actual, ""));
-        mfree(actual);
+        free(actual);
 
         actual = strjoin("foo", NULL, "bar");
         assert_se(streq(actual, "foo"));
-        mfree(actual);
+        free(actual);
 }
 
 TEST(strcmp_ptr) {
@@ -460,7 +460,7 @@ static void check(const char *test, char** expected, bool trailing) {
                 assert_se(streq(word, expected[i++]));
                 printf("<%s>\n", word);
         }
-        assert_se(expected[i] == NULL);
+        ASSERT_NULL(expected[i]);
 }
 
 TEST(foreach_word_quoted) {
@@ -802,7 +802,7 @@ TEST(string_contains_word_strv) {
         assert_se(streq(w, "a"));
 
         assert_se(!string_contains_word_strv("a b cc", NULL, STRV_MAKE("d"), &w));
-        assert_se(w == NULL);
+        ASSERT_NULL(w);
 
         assert_se(string_contains_word_strv("a b cc", NULL, STRV_MAKE("b", "a"), &w));
         assert_se(streq(w, "a"));
@@ -814,7 +814,7 @@ TEST(string_contains_word_strv) {
         assert_se(streq(w, "b"));
 
         assert_se(!string_contains_word_strv("a b cc", NULL, STRV_MAKE(""), &w));
-        assert_se(w == NULL);
+        ASSERT_NULL(w);
 
         assert_se(string_contains_word_strv("a b  cc", " ", STRV_MAKE(""), &w));
         assert_se(streq(w, ""));

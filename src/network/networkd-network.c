@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+/* Make sure the net/if.h header is included before any linux/ one */
 #include <net/if.h>
 #include <netinet/in.h>
 #include <linux/netdevice.h>
@@ -474,6 +475,7 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
                 .ipv4_rp_filter = _IP_REVERSE_PATH_FILTER_INVALID,
 
                 .ndisc = -1,
+                .ndisc_use_redirect = true,
                 .ndisc_use_dns = true,
                 .ndisc_use_gateway = true,
                 .ndisc_use_captive_portal = true,

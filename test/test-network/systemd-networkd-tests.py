@@ -60,6 +60,7 @@ networkctl_bin = shutil.which('networkctl', path=which_paths)
 resolvectl_bin = shutil.which('resolvectl', path=which_paths)
 timedatectl_bin = shutil.which('timedatectl', path=which_paths)
 udevadm_bin = shutil.which('udevadm', path=which_paths)
+test_ndisc_send = None
 build_dir = None
 source_dir = None
 
@@ -1127,6 +1128,16 @@ class Utilities():
                 break
 
         self.assertRegex(output, route_regex)
+
+    def wait_route_dropped(self, link, route_regex, table='main', ipv='', timeout_sec=100):
+        for i in range(timeout_sec):
+            if i > 0:
+                time.sleep(1)
+            output = check_output(f'ip {ipv} route show dev {link} table {table}')
+            if not re.search(route_regex, output):
+                break
+
+        self.assertNotRegex(output, route_regex)
 
     def check_netlabel(self, interface, address, label='system_u:object_r:root_t:s0'):
         if not shutil.which('selinuxenabled'):
@@ -5529,15 +5540,123 @@ class NetworkdRATests(unittest.TestCase, Utilities):
 
         self.check_ipv6_token_static()
 
+    def test_ndisc_redirect(self):
+        if not os.path.exists(test_ndisc_send):
+            self.skipTest(f"{test_ndisc_send} does not exist.")
+
+        copy_network_unit('25-veth.netdev', '25-ipv6-prefix.network', '25-ipv6-prefix-veth-token-static.network')
+        start_networkd()
+
+        self.check_ipv6_token_static()
+
+        # Introduce two redirect routes.
+        check_output(f'{test_ndisc_send} --interface veth-peer --type redirect --target-address 2002:da8:1:1:1a:2b:3c:4d --redirect-destination 2002:da8:1:1:1a:2b:3c:4d')
+        check_output(f'{test_ndisc_send} --interface veth-peer --type redirect --target-address 2002:da8:1::1 --redirect-destination 2002:da8:1:2:1a:2b:3c:4d')
+        self.wait_route('veth99', r'2002:da8:1:1:1a:2b:3c:4d proto redirect', ipv='-6', timeout_sec=10)
+        self.wait_route('veth99', r'2002:da8:1:2:1a:2b:3c:4d via 2002:da8:1::1 proto redirect', ipv='-6', timeout_sec=10)
+
+        # Change the target address of the redirects.
+        check_output(f'{test_ndisc_send} --interface veth-peer --type redirect --target-address 2002:da8:1::2 --redirect-destination 2002:da8:1:1:1a:2b:3c:4d')
+        check_output(f'{test_ndisc_send} --interface veth-peer --type redirect --target-address 2002:da8:1::3 --redirect-destination 2002:da8:1:2:1a:2b:3c:4d')
+        self.wait_route_dropped('veth99', r'2002:da8:1:1:1a:2b:3c:4d proto redirect', ipv='-6', timeout_sec=10)
+        self.wait_route_dropped('veth99', r'2002:da8:1:2:1a:2b:3c:4d via 2002:da8:1::1 proto redirect', ipv='-6', timeout_sec=10)
+        self.wait_route('veth99', r'2002:da8:1:1:1a:2b:3c:4d via 2002:da8:1::2 proto redirect', ipv='-6', timeout_sec=10)
+        self.wait_route('veth99', r'2002:da8:1:2:1a:2b:3c:4d via 2002:da8:1::3 proto redirect', ipv='-6', timeout_sec=10)
+
+        # Send Neighbor Advertisement without the router flag to announce the default router is not available anymore.
+        # Then, verify that all redirect routes and the default route are dropped.
+        output = check_output('ip -6 address show dev veth-peer scope link')
+        veth_peer_ipv6ll = re.search('fe80:[:0-9a-f]*', output).group()
+        print(f'veth-peer IPv6LL address: {veth_peer_ipv6ll}')
+        check_output(f'{test_ndisc_send} --interface veth-peer --type neighbor-advertisement --target-address {veth_peer_ipv6ll} --is-router no')
+        self.wait_route_dropped('veth99', 'proto redirect', ipv='-6', timeout_sec=10)
+        self.wait_route_dropped('veth99', 'proto ra', ipv='-6', timeout_sec=10)
+
+    def check_ndisc_mtu(self, mtu):
+        for _ in range(20):
+            output = read_ipv6_sysctl_attr('veth99', 'mtu')
+            if output == f'{mtu}':
+                break
+            time.sleep(0.5)
+        else:
+            self.fail(f'IPv6 MTU does not matches: value={output}, expected={mtu}')
+
+    def test_ndisc_mtu(self):
+        if not os.path.exists(test_ndisc_send):
+            self.skipTest(f"{test_ndisc_send} does not exist.")
+
+        copy_network_unit('25-veth.netdev',
+                          '25-veth-peer-no-address.network',
+                          '25-ipv6-prefix-veth-token-static.network')
+        start_networkd()
+        self.wait_online('veth-peer:degraded')
+
+        for _ in range(20):
+            output = read_networkd_log()
+            if 'veth99: NDISC: Started IPv6 Router Solicitation client' in output:
+                break
+            time.sleep(0.5)
+        else:
+            self.fail('sd-ndisc does not started on veth99.')
+
+        check_output(f'{test_ndisc_send} --interface veth-peer --type ra --lifetime 1hour --mtu 1400')
+        self.check_ndisc_mtu(1400)
+
+        check_output(f'{test_ndisc_send} --interface veth-peer --type ra --lifetime 1hour --mtu 1410')
+        self.check_ndisc_mtu(1410)
+
+        check_output('ip link set dev veth99 mtu 1600')
+        self.check_ndisc_mtu(1410)
+
+        check_output(f'{test_ndisc_send} --interface veth-peer --type ra --lifetime 1hour --mtu 1700')
+        self.check_ndisc_mtu(1600)
+
+        check_output('ip link set dev veth99 mtu 1800')
+        self.check_ndisc_mtu(1700)
+
     def test_ipv6_token_prefixstable(self):
         copy_network_unit('25-veth.netdev', '25-ipv6-prefix.network', '25-ipv6-prefix-veth-token-prefixstable.network')
         start_networkd()
         self.wait_online('veth99:routable', 'veth-peer:degraded')
 
-        output = networkctl_status('veth99')
+        output = check_output('ip -6 address show dev veth99')
         print(output)
-        self.assertIn('2002:da8:1:0:b47e:7975:fc7a:7d6e', output)
-        self.assertIn('2002:da8:2:0:1034:56ff:fe78:9abc', output) # EUI64
+        self.assertIn('2002:da8:1:0:b47e:7975:fc7a:7d6e/64', output) # the 1st prefixstable
+        self.assertIn('2002:da8:2:0:1034:56ff:fe78:9abc/64', output) # EUI64
+
+        with open(os.path.join(network_unit_dir, '25-ipv6-prefix-veth-token-prefixstable.network'), mode='a', encoding='utf-8') as f:
+            f.write('\n[IPv6AcceptRA]\nPrefixAllowList=2002:da8:1:0::/64\n')
+
+        networkctl_reload()
+        self.wait_online('veth99:routable')
+
+        output = check_output('ip -6 address show dev veth99')
+        print(output)
+        self.assertIn('2002:da8:1:0:b47e:7975:fc7a:7d6e/64', output) # the 1st prefixstable
+        self.assertNotIn('2002:da8:2:0:1034:56ff:fe78:9abc/64', output) # EUI64
+
+        check_output('ip address del 2002:da8:1:0:b47e:7975:fc7a:7d6e/64 dev veth99')
+        check_output('ip address add 2002:da8:1:0:b47e:7975:fc7a:7d6e/64 dev veth-peer nodad')
+
+        networkctl_reconfigure('veth99')
+        self.wait_online('veth99:routable')
+
+        output = check_output('ip -6 address show dev veth99')
+        print(output)
+        self.assertNotIn('2002:da8:1:0:b47e:7975:fc7a:7d6e/64', output) # the 1st prefixstable
+        self.assertIn('2002:da8:1:0:da5d:e50a:43fd:5d0f/64', output) # the 2nd prefixstable
+
+        check_output('ip address del 2002:da8:1:0:da5d:e50a:43fd:5d0f/64 dev veth99')
+        check_output('ip address add 2002:da8:1:0:da5d:e50a:43fd:5d0f/64 dev veth-peer nodad')
+
+        networkctl_reconfigure('veth99')
+        self.wait_online('veth99:routable')
+
+        output = check_output('ip -6 address show dev veth99')
+        print(output)
+        self.assertNotIn('2002:da8:1:0:b47e:7975:fc7a:7d6e/64', output) # the 1st prefixstable
+        self.assertNotIn('2002:da8:1:0:da5d:e50a:43fd:5d0f/64', output) # the 2nd prefixstable
+        self.assertIn('2002:da8:1:0:c7e4:77ec:eb31:1b0d/64', output) # the 3rd prefixstable
 
     def test_ipv6_token_prefixstable_without_address(self):
         copy_network_unit('25-veth.netdev', '25-ipv6-prefix.network', '25-ipv6-prefix-veth-token-prefixstable-without-address.network')
@@ -5721,11 +5840,7 @@ class NetworkdDHCPServerTests(unittest.TestCase, Utilities):
     def tearDown(self):
         tear_down_common()
 
-    def test_dhcp_server(self):
-        copy_network_unit('25-veth.netdev', '25-dhcp-client.network', '25-dhcp-server.network')
-        start_networkd()
-        self.wait_online('veth99:routable', 'veth-peer:routable')
-
+    def check_dhcp_server(self, persist_leases=True):
         output = networkctl_status('veth99')
         print(output)
         self.assertRegex(output, r'Address: 192.168.5.[0-9]* \(DHCP4 via 192.168.5.1\)')
@@ -5737,6 +5852,19 @@ class NetworkdDHCPServerTests(unittest.TestCase, Utilities):
         print(output)
         self.assertRegex(output, "Offered DHCP leases: 192.168.5.[0-9]*")
 
+        if persist_leases:
+            with open('/var/lib/systemd/network/dhcp-server-lease/veth-peer', encoding='utf-8') as f:
+                check_json(f.read())
+        else:
+            self.assertFalse(os.path.exists('/var/lib/systemd/network/dhcp-server-lease/veth-peer'))
+
+    def test_dhcp_server(self):
+        copy_network_unit('25-veth.netdev', '25-dhcp-client.network', '25-dhcp-server.network')
+        start_networkd()
+        self.wait_online('veth99:routable', 'veth-peer:routable')
+
+        self.check_dhcp_server()
+
         networkctl_reconfigure('veth-peer')
         self.wait_online('veth-peer:routable')
 
@@ -5747,6 +5875,22 @@ class NetworkdDHCPServerTests(unittest.TestCase, Utilities):
             time.sleep(.2)
         else:
             self.fail()
+
+    def test_dhcp_server_persist_leases_no(self):
+        copy_networkd_conf_dropin('persist-leases-no.conf')
+        copy_network_unit('25-veth.netdev', '25-dhcp-client.network', '25-dhcp-server.network')
+        start_networkd()
+        self.wait_online('veth99:routable', 'veth-peer:routable')
+
+        self.check_dhcp_server(persist_leases=False)
+
+        remove_networkd_conf_dropin('persist-leases-no.conf')
+        with open(os.path.join(network_unit_dir, '25-dhcp-server.network'), mode='a', encoding='utf-8') as f:
+            f.write('[DHCPServer]\nPersistLeases=no')
+        restart_networkd()
+        self.wait_online('veth99:routable', 'veth-peer:routable')
+
+        self.check_dhcp_server(persist_leases=False)
 
     def test_dhcp_server_null_server_address(self):
         copy_network_unit('25-veth.netdev', '25-dhcp-client.network', '25-dhcp-server-null-server-address.network')
@@ -7586,6 +7730,11 @@ if __name__ == '__main__':
     timedatectl_cmd = valgrind_cmd.split() + [timedatectl_bin]
     udevadm_cmd = valgrind_cmd.split() + [udevadm_bin]
     wait_online_cmd = valgrind_cmd.split() + [wait_online_bin]
+
+    if build_dir:
+        test_ndisc_send = os.path.normpath(os.path.join(build_dir, 'test-ndisc-send'))
+    else:
+        test_ndisc_send = '/usr/lib/tests/test-ndisc-send'
 
     if asan_options:
         env.update({'ASAN_OPTIONS': asan_options})

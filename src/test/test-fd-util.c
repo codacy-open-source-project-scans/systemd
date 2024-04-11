@@ -138,6 +138,7 @@ TEST(rearrange_stdio) {
 
         if (r == 0) {
                 _cleanup_free_ char *path = NULL;
+                int pipe_read_fd, pair[2];
                 char buffer[10];
 
                 /* Child */
@@ -145,6 +146,10 @@ TEST(rearrange_stdio) {
                 safe_close(STDERR_FILENO); /* Let's close an fd < 2, to make it more interesting */
 
                 assert_se(rearrange_stdio(-EBADF, -EBADF, -EBADF) >= 0);
+                /* Reconfigure logging after rearranging stdout/stderr, so we still log to somewhere if the
+                 * following tests fail, making it slightly less annoying to debug */
+                log_set_target(LOG_TARGET_KMSG);
+                log_open();
 
                 assert_se(fd_get_path(STDIN_FILENO, &path) >= 0);
                 assert_se(path_equal(path, "/dev/null"));
@@ -162,13 +167,12 @@ TEST(rearrange_stdio) {
                 safe_close(STDOUT_FILENO);
                 safe_close(STDERR_FILENO);
 
-                {
-                        int pair[2];
-                        assert_se(pipe(pair) >= 0);
-                        assert_se(pair[0] == 0);
-                        assert_se(pair[1] == 1);
-                        assert_se(fd_move_above_stdio(0) == 3);
-                }
+                assert_se(pipe(pair) >= 0);
+                assert_se(pair[0] == 0);
+                assert_se(pair[1] == 1);
+                pipe_read_fd = fd_move_above_stdio(0);
+                assert_se(pipe_read_fd >= 3);
+
                 assert_se(open("/dev/full", O_WRONLY|O_CLOEXEC) == 0);
                 assert_se(acquire_data_fd("foobar") == 2);
 
@@ -176,7 +180,7 @@ TEST(rearrange_stdio) {
 
                 assert_se(write(1, "x", 1) < 0 && errno == ENOSPC);
                 assert_se(write(2, "z", 1) == 1);
-                assert_se(read(3, buffer, sizeof(buffer)) == 1);
+                assert_se(read(pipe_read_fd, buffer, sizeof(buffer)) == 1);
                 assert_se(buffer[0] == 'z');
                 assert_se(read(0, buffer, sizeof(buffer)) == 6);
                 assert_se(memcmp(buffer, "foobar", 6) == 0);
@@ -184,7 +188,7 @@ TEST(rearrange_stdio) {
                 assert_se(rearrange_stdio(-EBADF, 1, 2) >= 0);
                 assert_se(write(1, "a", 1) < 0 && errno == ENOSPC);
                 assert_se(write(2, "y", 1) == 1);
-                assert_se(read(3, buffer, sizeof(buffer)) == 1);
+                assert_se(read(pipe_read_fd, buffer, sizeof(buffer)) == 1);
                 assert_se(buffer[0] == 'y');
 
                 assert_se(fd_get_path(0, &path) >= 0);
@@ -409,7 +413,7 @@ TEST(fd_reopen) {
         fd1 = open("/proc", O_DIRECTORY|O_PATH|O_CLOEXEC);
         assert_se(fd1 >= 0);
 
-        assert_se(fstat(fd1, &st1) >= 0);
+        ASSERT_OK_ERRNO(fstat(fd1, &st1));
         assert_se(S_ISDIR(st1.st_mode));
 
         fl = fcntl(fd1, F_GETFL);
@@ -424,7 +428,7 @@ TEST(fd_reopen) {
         fd2 = fd_reopen(fd1, O_RDONLY|O_DIRECTORY|O_CLOEXEC);  /* drop the O_PATH */
         assert_se(fd2 >= 0);
 
-        assert_se(fstat(fd2, &st2) >= 0);
+        ASSERT_OK_ERRNO(fstat(fd2, &st2));
         assert_se(S_ISDIR(st2.st_mode));
         assert_se(stat_inode_same(&st1, &st2));
 
@@ -438,7 +442,7 @@ TEST(fd_reopen) {
         fd1 = fd_reopen(fd2, O_DIRECTORY|O_PATH|O_CLOEXEC);  /* reacquire the O_PATH */
         assert_se(fd1 >= 0);
 
-        assert_se(fstat(fd1, &st1) >= 0);
+        ASSERT_OK_ERRNO(fstat(fd1, &st1));
         assert_se(S_ISDIR(st1.st_mode));
         assert_se(stat_inode_same(&st1, &st2));
 
@@ -453,7 +457,7 @@ TEST(fd_reopen) {
         fd1 = open("/proc/version", O_PATH|O_CLOEXEC);
         assert_se(fd1 >= 0);
 
-        assert_se(fstat(fd1, &st1) >= 0);
+        ASSERT_OK_ERRNO(fstat(fd1, &st1));
         assert_se(S_ISREG(st1.st_mode));
 
         fl = fcntl(fd1, F_GETFL);
@@ -465,7 +469,7 @@ TEST(fd_reopen) {
         fd2 = fd_reopen(fd1, O_RDONLY|O_CLOEXEC);  /* drop the O_PATH */
         assert_se(fd2 >= 0);
 
-        assert_se(fstat(fd2, &st2) >= 0);
+        ASSERT_OK_ERRNO(fstat(fd2, &st2));
         assert_se(S_ISREG(st2.st_mode));
         assert_se(stat_inode_same(&st1, &st2));
 
@@ -480,7 +484,7 @@ TEST(fd_reopen) {
         fd1 = fd_reopen(fd2, O_PATH|O_CLOEXEC);  /* reacquire the O_PATH */
         assert_se(fd1 >= 0);
 
-        assert_se(fstat(fd1, &st1) >= 0);
+        ASSERT_OK_ERRNO(fstat(fd1, &st1));
         assert_se(S_ISREG(st1.st_mode));
         assert_se(stat_inode_same(&st1, &st2));
 
@@ -497,12 +501,12 @@ TEST(fd_reopen) {
         /* Validate what happens if we reopen a symlink */
         fd1 = open("/proc/self", O_PATH|O_CLOEXEC|O_NOFOLLOW);
         assert_se(fd1 >= 0);
-        assert_se(fstat(fd1, &st1) >= 0);
+        ASSERT_OK_ERRNO(fstat(fd1, &st1));
         assert_se(S_ISLNK(st1.st_mode));
 
         fd2 = fd_reopen(fd1, O_PATH|O_CLOEXEC);
         assert_se(fd2 >= 0);
-        assert_se(fstat(fd2, &st2) >= 0);
+        ASSERT_OK_ERRNO(fstat(fd2, &st2));
         assert_se(S_ISLNK(st2.st_mode));
         assert_se(stat_inode_same(&st1, &st2));
         fd2 = safe_close(fd2);

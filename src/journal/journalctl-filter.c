@@ -69,7 +69,7 @@ static int add_dmesg(sd_journal *j) {
         if (!arg_dmesg)
                 return 0;
 
-        r = sd_journal_add_match(j, "_TRANSPORT=kernel", 0);
+        r = sd_journal_add_match(j, "_TRANSPORT=kernel", SIZE_MAX);
         if (r < 0)
                 return r;
 
@@ -385,11 +385,7 @@ get_parent:
                         break;
         }
 
-        r = add_match_this_boot(j, arg_machine);
-        if (r < 0)
-                return log_error_errno(r, "Failed to add match for the current boot: %m");
-
-        return 0;
+        return add_match_boot_id(j, SD_ID128_NULL);
 }
 
 static int add_matches_for_path(sd_journal *j, const char *path) {
@@ -444,7 +440,7 @@ static int add_matches(sd_journal *j, char **args) {
                         have_term = true;
 
                 } else {
-                        r = sd_journal_add_match(j, *i, 0);
+                        r = sd_journal_add_match(j, *i, SIZE_MAX);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to add match '%s': %m", *i);
                         have_term = true;
