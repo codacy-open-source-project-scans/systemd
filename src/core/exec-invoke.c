@@ -3717,7 +3717,7 @@ static int connect_unix_harder(const ExecContext *c, const ExecParameters *p, co
                 return log_exec_error_errno(c, p, r, "Failed to set sockaddr for '%s': %m", of->path);
         sa_len = r;
 
-        FOREACH_ARRAY(i, socket_types, ELEMENTSOF(socket_types)) {
+        FOREACH_ELEMENT(i, socket_types) {
                 _cleanup_close_ int fd = -EBADF;
 
                 fd = socket(AF_UNIX, *i|SOCK_CLOEXEC, 0);
@@ -4264,9 +4264,10 @@ int exec_invoke(
                 r = cg_attach_everywhere(params->cgroup_supported, p, 0, NULL, NULL);
                 if (r == -EUCLEAN) {
                         *exit_status = EXIT_CGROUP;
-                        return log_exec_error_errno(context, params, r, "Failed to attach process to cgroup %s "
+                        return log_exec_error_errno(context, params, r,
+                                                    "Failed to attach process to cgroup '%s', "
                                                     "because the cgroup or one of its parents or "
-                                                    "siblings is in the threaded mode: %m", p);
+                                                    "siblings is in the threaded mode.", p);
                 }
                 if (r < 0) {
                         *exit_status = EXIT_CGROUP;
@@ -5264,12 +5265,14 @@ int exec_invoke(
         log_command_line(context, params, "Executing", executable, final_argv);
 
         if (params->exec_fd >= 0) {
-                uint8_t hot = 1;
+                usec_t t = now(CLOCK_MONOTONIC);
 
                 /* We have finished with all our initializations. Let's now let the manager know that. From this point
-                 * on, if the manager sees POLLHUP on the exec_fd, then execve() was successful. */
+                 * on, if the manager sees POLLHUP on the exec_fd, then execve() was successful. We send a
+                 * timestamp so that the service manager and users can track the precise moment we handed
+                 * over execution of the service to the kernel. */
 
-                if (write(params->exec_fd, &hot, sizeof(hot)) < 0) {
+                if (write(params->exec_fd, &t, sizeof(t)) < 0) {
                         *exit_status = EXIT_EXEC;
                         return log_exec_error_errno(context, params, errno, "Failed to enable exec_fd: %m");
                 }
@@ -5278,7 +5281,7 @@ int exec_invoke(
         r = fexecve_or_execve(executable_fd, executable, final_argv, accum_env);
 
         if (params->exec_fd >= 0) {
-                uint8_t hot = 0;
+                uint64_t hot = 0;
 
                 /* The execve() failed. This means the exec_fd is still open. Which means we need to tell the manager
                  * that POLLHUP on it no longer means execve() succeeded. */

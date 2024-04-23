@@ -98,6 +98,7 @@ bool isatty_safe(int fd);
 int reset_terminal_fd(int fd, bool switch_to_text);
 int reset_terminal(const char *name);
 int set_terminal_cursor_position(int fd, unsigned int row, unsigned int column);
+int terminal_reset_ansi_seq(int fd);
 
 int open_terminal(const char *name, int mode);
 
@@ -172,6 +173,7 @@ void columns_lines_cache_reset(int _unused_ signum);
 void reset_terminal_feature_caches(void);
 
 bool on_tty(void);
+bool getenv_terminal_is_dumb(void);
 bool terminal_is_dumb(void);
 ColorMode get_color_mode(void);
 bool underline_enabled(void);

@@ -109,6 +109,7 @@ int manager_serialize(
         (void) serialize_usec(f, "pretimeout-watchdog-overridden", m->watchdog_overridden[WATCHDOG_PRETIMEOUT]);
         (void) serialize_item(f, "pretimeout-watchdog-governor-overridden", m->watchdog_pretimeout_governor_overridden);
 
+        (void) serialize_item(f, "previous-objective", manager_objective_to_string(m->objective));
         (void) serialize_item_format(f, "soft-reboots-count", "%u", m->soft_reboots_count);
 
         for (ManagerTimestamp q = 0; q < _MANAGER_TIMESTAMP_MAX; q++) {
@@ -529,6 +530,15 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                                 log_notice("Failed to parse soft reboots counter '%s', ignoring.", val);
                         else
                                 m->soft_reboots_count = n;
+                } else if ((val = startswith(l, "previous-objective="))) {
+                        ManagerObjective objective;
+
+                        objective = manager_objective_from_string(val);
+                        if (objective < 0)
+                                log_notice("Failed to parse previous objective '%s', ignoring.", val);
+                        else
+                                m->previous_objective = objective;
+
                 } else {
                         ManagerTimestamp q;
 

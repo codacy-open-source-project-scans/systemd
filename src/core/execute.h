@@ -91,6 +91,7 @@ typedef enum ExecKeyringMode {
 struct ExecStatus {
         dual_timestamp start_timestamp;
         dual_timestamp exit_timestamp;
+        dual_timestamp handover_timestamp;
         pid_t pid;
         int code;     /* as in siginfo_t::si_code */
         int status;   /* as in siginfo_t::si_status */
@@ -443,7 +444,9 @@ struct ExecParameters {
         int stdout_fd;
         int stderr_fd;
 
-        /* An fd that is closed by the execve(), and thus will result in EOF when the execve() is done */
+        /* An fd that is closed by the execve(), and thus will result in EOF when the execve() is done. It
+         * will also be used to send a timestamp taken as the very last operation before execve, for
+         * tracking purposes. */
         int exec_fd;
 
         char *notify_socket;
@@ -487,10 +490,13 @@ int exec_spawn(Unit *unit,
 
 void exec_command_done(ExecCommand *c);
 void exec_command_done_array(ExecCommand *c, size_t n);
+ExecCommand* exec_command_free(ExecCommand *c);
+DEFINE_TRIVIAL_CLEANUP_FUNC(ExecCommand*, exec_command_free);
 ExecCommand* exec_command_free_list(ExecCommand *c);
 void exec_command_free_array(ExecCommand **c, size_t n);
 void exec_command_reset_status_array(ExecCommand *c, size_t n);
 void exec_command_reset_status_list_array(ExecCommand **c, size_t n);
+
 void exec_command_dump_list(ExecCommand *c, FILE *f, const char *prefix);
 void exec_command_append_list(ExecCommand **l, ExecCommand *e);
 int exec_command_set(ExecCommand *c, const char *path, ...) _sentinel_;

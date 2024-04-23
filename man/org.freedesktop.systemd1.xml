@@ -340,9 +340,9 @@ node /org/freedesktop/systemd1 {
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t FinishTimestampMonotonic = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
-      readonly t SoftRebootStartTimestamp = ...;
+      readonly t ShutdownStartTimestamp = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
-      readonly t SoftRebootStartTimestampMonotonic = ...;
+      readonly t ShutdownStartTimestampMonotonic = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t SecurityStartTimestamp = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
@@ -574,8 +574,6 @@ node /org/freedesktop/systemd1 {
     <!--method GetUnitByControlGroup is not documented!-->
 
     <!--method EnqueueUnitJob is not documented!-->
-
-    <!--method CleanUnit is not documented!-->
 
     <!--method FreezeUnit is not documented!-->
 
@@ -1039,9 +1037,9 @@ node /org/freedesktop/systemd1 {
 
     <variablelist class="dbus-property" generated="True" extra-ref="FinishTimestampMonotonic"/>
 
-    <variablelist class="dbus-property" generated="True" extra-ref="SoftRebootStartTimestamp"/>
+    <variablelist class="dbus-property" generated="True" extra-ref="ShutdownStartTimestamp"/>
 
-    <variablelist class="dbus-property" generated="True" extra-ref="SoftRebootStartTimestampMonotonic"/>
+    <variablelist class="dbus-property" generated="True" extra-ref="ShutdownStartTimestampMonotonic"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="SecurityStartTimestamp"/>
 
@@ -1585,6 +1583,12 @@ node /org/freedesktop/systemd1 {
       shouldn't be bound to a lifecycle of the service, e.g. they should continue running after the restart
       of the service. Note that the main PID of the service can not be migrated to an auxiliary scope.
       Also, <varname>flags</varname> argument must be 0 and is reserved for future extensions.</para>
+
+      <para><function>CleanUnit()</function> deletes the configuration, state, logs, cache and runtime data
+      directories and clear out the file descriptors store for the unit, as specified in the mask
+      parameters. The possible values are <literal>configuration</literal>, <literal>state</literal>,
+      <literal>logs</literal>, <literal>cache</literal>, <literal>runtime</literal>,
+      <literal>fdstore</literal>, and <literal>all</literal>.</para>
     </refsect2>
 
     <refsect2>
@@ -1746,12 +1750,11 @@ node /org/freedesktop/systemd1 {
       <varname>InitRDTimestamp</varname>, <varname>InitRDTimestampMonotonic</varname>,
       <varname>UserspaceTimestamp</varname>, <varname>UserspaceTimestampMonotonic</varname>,
       <varname>FinishTimestamp</varname>, <varname>FinishTimestampMonotonic</varname>,
-      <varname>SoftRebootStartTimestamp</varname> and <varname>SoftRebootStartTimestampMonotonic</varname>
+      <varname>ShutdownStartTimestamp</varname> and <varname>ShutdownStartTimestampMonotonic</varname>
       encode <constant>CLOCK_REALTIME</constant> and <constant>CLOCK_MONOTONIC</constant> microsecond
       timestamps taken when the firmware first began execution, when the boot loader first began execution,
       when the kernel first began execution, when the initrd first began execution, when the main systemd
-      instance began execution, when all queued startup jobs finished execution and finally, when a
-      <citerefentry><refentrytitle>systemd-soft-reboot.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+      instance began execution, when all queued startup jobs finished execution and finally, when a shutdown
       operation first began execution. These values are useful for determining boot-time performance. Note
       that as monotonic time begins with the kernel startup, the <varname>KernelTimestampMonotonic</varname>
       timestamp will always be 0 and <varname>FirmwareTimestampMonotonic</varname> and
@@ -1792,7 +1795,7 @@ node /org/freedesktop/systemd1 {
       file system paths encoded as strings.</para>
 
       <para><varname>SoftRebootsCount</varname> encodes how many soft-reboots were successfully completed
-      since the last full boot.</para>
+      since the last full boot. Starts at <literal>0</literal>.</para>
 
       <para><varname>Virtualization</varname> contains a short ID string describing the virtualization
       technology the system runs in. On bare-metal hardware this is the empty string. Otherwise, it contains
@@ -2765,6 +2768,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
       readonly t ExecMainStartTimestampMonotonic = ...;
       readonly t ExecMainExitTimestamp = ...;
       readonly t ExecMainExitTimestampMonotonic = ...;
+      readonly t ExecMainHandoverTimestamp = ...;
+      readonly t ExecMainHandoverTimestampMonotonic = ...;
       readonly u ExecMainPID = ...;
       readonly i ExecMainCode = ...;
       readonly i ExecMainStatus = ...;
@@ -4054,6 +4059,10 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
 
     <variablelist class="dbus-property" generated="True" extra-ref="ExecMainExitTimestampMonotonic"/>
 
+    <variablelist class="dbus-property" generated="True" extra-ref="ExecMainHandoverTimestamp"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="ExecMainHandoverTimestampMonotonic"/>
+
     <variablelist class="dbus-property" generated="True" extra-ref="ExecMainPID"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="ExecMainCode"/>
@@ -4703,12 +4712,17 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
 
       <para><varname>ExecMainStartTimestamp</varname>, <varname>ExecMainStartTimestampMonotonic</varname>,
       <varname>ExecMainExitTimestamp</varname>, <varname>ExecMainExitTimestampMonotonic</varname>,
+      <varname>ExecMainHandoverTimestamp</varname>, <varname>ExecMainHandoverTimestampMonotonic</varname>,
       <varname>ExecMainPID</varname>, <varname>ExecMainCode</varname>, <varname>ExecMainStatus</varname>
-      contain information about the main process of the service as far as it is known. This is often the same
-      runtime information that is stored in <varname>ExecStart</varname>. However, it deviates for
-      <varname>Type=forking</varname> services where the main process of the service is not forked off
-      systemd directly. These fields either contain information of the last run of the process or of the
-      current running process.</para>
+      contain information about the main process of the service as far as it is known. The
+      <varname>ExecMainStartTimestamp</varname> timestamps record when the main child process is spawned by
+      the service manager. <varname>ExecMainExitTimestamp</varname> timestamps record when the main child
+      process exit has been detected by the service manager. <varname>ExecMainHandoverTimestamp</varname>
+      timestamps record when the service executable is executed by <command>systemd-executor</command>.
+      This is often the same runtime information that is stored in <varname>ExecStart=</varname>. However,
+      it deviates for <varname>Type=forking</varname> services where the main process of the service is not
+      forked off systemd directly. These fields either contain information of the last run of the process or
+      of the current running process.</para>
 
       <para><varname>MainPID</varname> and <varname>ControlPID</varname> contain the main and control PID of
       the service. The main PID is the current main PID of the service and is 0 when the service currently
@@ -12000,8 +12014,8 @@ $ gdbus introspect --system --dest org.freedesktop.systemd1 \
       <function>SoftReboot()</function>, and
       <function>DumpUnitFileDescriptorStore()</function> were added in version 254.</para>
       <para><function>StartAuxiliaryScope()</function>,
-      <varname>SoftRebootStartTimestamp</varname>,
-      <varname>SoftRebootStartTimestampMonotonic</varname> and
+      <varname>ShutdownStartTimestamp</varname>,
+      <varname>ShutdownStartTimestampMonotonic</varname> and
       <varname>SoftRebootsCount</varname> were added in version 256.</para>
     </refsect2>
     <refsect2>
@@ -12052,8 +12066,10 @@ $ gdbus introspect --system --dest org.freedesktop.systemd1 \
       <varname>MemoryZSwapCurrent</varname> were added in version 255.</para>
       <para><varname>EffectiveMemoryHigh</varname>,
       <varname>EffectiveMemoryMax</varname>,
-      <varname>EffectiveTasksMax</varname>, and
-      <varname>MemoryZSwapWriteback</varname> were added in version 256.</para>
+      <varname>EffectiveTasksMax</varname>,
+      <varname>MemoryZSwapWriteback</varname>,
+      <varname>ExecMainHandoverTimestampMonotonic</varname>, and
+      <varname>ExecMainHandoverTimestamp</varname> were added in version 256.</para>
     </refsect2>
     <refsect2>
       <title>Socket Unit Objects</title>

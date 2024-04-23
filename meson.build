@@ -2573,6 +2573,32 @@ endif
 
 #####################################################################
 
+mkosi = find_program('mkosi', required : false)
+if mkosi.found()
+        custom_target('mkosi',
+                build_always_stale : true,
+                build_by_default: false,
+                console : true,
+                output : '.',
+                command : [
+                        'mkosi',
+                        '--directory', meson.current_source_dir(),
+                        '--output-dir', meson.current_build_dir() / 'mkosi.output',
+                        '--cache-dir', meson.current_build_dir() / 'mkosi.cache',
+                        '--build-dir', meson.current_build_dir() / 'mkosi.builddir',
+                        '--force',
+                        'build'
+                ],
+                depends : public_programs + [
+                        executables_by_name['systemd-journal-remote'],
+                        executables_by_name['systemd-measure'],
+                        ukify,
+                ],
+        )
+endif
+
+############################################################
+
 subdir('rules.d')
 subdir('test')
 

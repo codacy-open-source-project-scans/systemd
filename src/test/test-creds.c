@@ -39,21 +39,21 @@ TEST(read_credential_strings) {
 
         assert_se(read_credential_strings_many("foo", &x, "bar", &y) == 0);
         ASSERT_NULL(x);
-        assert_se(streq(y, "piff"));
+        ASSERT_STREQ(y, "piff");
 
         assert_se(write_string_file(p, "paff", WRITE_STRING_FILE_TRUNCATE|WRITE_STRING_FILE_AVOID_NEWLINE) >= 0);
 
         assert_se(read_credential_strings_many("foo", &x, "bar", &y) == 0);
         ASSERT_NULL(x);
-        assert_se(streq(y, "paff"));
+        ASSERT_STREQ(y, "paff");
 
         p = mfree(p);
         assert_se(p = path_join(tmp, "foo"));
         assert_se(write_string_file(p, "knurz", WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_AVOID_NEWLINE) >= 0);
 
         assert_se(read_credential_strings_many("foo", &x, "bar", &y) >= 0);
-        assert_se(streq(x, "knurz"));
-        assert_se(streq(y, "paff"));
+        ASSERT_STREQ(x, "knurz");
+        ASSERT_STREQ(y, "paff");
 
         p = mfree(p);
         assert_se(p = path_join(tmp, "bazz"));
@@ -64,8 +64,8 @@ TEST(read_credential_strings) {
         y = mfree(y);
 
         assert_se(read_credential_strings_many("bazz", &x, "bar", &y) == -EBADMSG);
-        assert_se(streq(x, "knurz"));
-        assert_se(streq(y, "paff"));
+        ASSERT_STREQ(x, "knurz");
+        ASSERT_STREQ(y, "paff");
 
         if (saved)
                 assert_se(setenv("CREDENTIALS_DIRECTORY", saved, /* override= */ 1) >= 0);
@@ -243,7 +243,7 @@ TEST(mime_type_matches) {
         };
 
         /* Generates the right <match/> expressions for these credentials according to the shared mime-info spec */
-        FOREACH_ARRAY(t, tags, ELEMENTSOF(tags)) {
+        FOREACH_ELEMENT(t, tags) {
                 _cleanup_free_ char *encoded = NULL;
 
                 assert_se(base64mem(t, sizeof(sd_id128_t), &encoded) >= 0);

@@ -43,6 +43,7 @@
 #include "random-util.h"
 #include "recovery-key.h"
 #include "sort-util.h"
+#include "string-table.h"
 #include "terminal-util.h"
 #include "tpm2-util.h"
 #include "unaligned.h"
@@ -51,6 +52,14 @@
 #include "varlink.h"
 #include "varlink-io.systemd.PCRLock.h"
 #include "verbs.h"
+
+typedef enum RecoveryPinMode {
+        RECOVERY_PIN_HIDE,           /* generate a recovery PIN automatically, but don't show it (alias: "no") */
+        RECOVERY_PIN_SHOW,           /* generate a recovery PIN automatically, and display it to the user */
+        RECOVERY_PIN_QUERY,          /* asks the user for a PIN to use interactively (alias: "yes") */
+        _RECOVERY_PIN_MODE_MAX,
+        _RECOVERY_PIN_MODE_INVALID = -EINVAL,
+} RecoveryPinMode;
 
 static PagerFlags arg_pager_flags = 0;
 static JsonFormatFlags arg_json_format_flags = JSON_FORMAT_OFF|JSON_FORMAT_NEWLINE;
@@ -62,7 +71,7 @@ static bool arg_raw_description = false;
 static char *arg_location_start = NULL;
 static char *arg_location_end = NULL;
 static TPM2_HANDLE arg_nv_index = 0;
-static bool arg_recovery_pin = false;
+static RecoveryPinMode arg_recovery_pin = RECOVERY_PIN_HIDE;
 static char *arg_policy_path = NULL;
 static bool arg_force = false;
 static BootEntryTokenType arg_entry_token_type = BOOT_ENTRY_TOKEN_AUTO;
@@ -103,6 +112,14 @@ STATIC_DESTRUCTOR_REGISTER(arg_entry_token, freep);
          (UINT32_C(1) << TPM2_PCR_SYSEXTS) |                 \
          (UINT32_C(1) << TPM2_PCR_SHIM_POLICY) |             \
          (UINT32_C(1) << TPM2_PCR_SYSTEM_IDENTITY))
+
+static const char* recovery_pin_mode_table[_RECOVERY_PIN_MODE_MAX] = {
+        [RECOVERY_PIN_HIDE]  = "hide",
+        [RECOVERY_PIN_SHOW]  = "show",
+        [RECOVERY_PIN_QUERY] = "query",
+};
+
+DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING_WITH_BOOLEAN(recovery_pin_mode, RecoveryPinMode, RECOVERY_PIN_QUERY);
 
 typedef struct EventLogRecordBank EventLogRecordBank;
 typedef struct EventLogRecord EventLogRecord;
@@ -1211,7 +1228,7 @@ static int event_log_read_pcrs(EventLog *el) {
 
         assert(el);
 
-        r = tpm2_context_new(NULL, &tc);
+        r = tpm2_context_new_or_warn(/* device= */ NULL, &tc);
         if (r < 0)
                 return r;
 
@@ -2662,7 +2679,7 @@ static int make_pcrlock_record(
                 assert_se(a = tpm2_hash_alg_to_string(*pa));
                 assert_se(md = EVP_get_digestbyname(a));
                 hash_ssize = EVP_MD_size(md);
-                assert_se(hash_ssize > 0);
+                assert(hash_ssize > 0);
                 hash_usize = hash_ssize;
 
                 hash = malloc(hash_usize);
@@ -2687,6 +2704,101 @@ static int make_pcrlock_record(
                                        JSON_BUILD_PAIR("digests", JSON_BUILD_VARIANT(digests))));
         if (r < 0)
                 return log_error_errno(r, "Failed to build record object: %m");
+
+        return 0;
+}
+
+static void evp_md_ctx_free_all(EVP_MD_CTX *(*md)[TPM2_N_HASH_ALGORITHMS]) {
+        assert(md);
+        FOREACH_ARRAY(alg, *md, TPM2_N_HASH_ALGORITHMS)
+                if (*alg)
+                        EVP_MD_CTX_free(*alg);
+}
+
+static int make_pcrlock_record_from_stream(
+                uint32_t pcr_mask,
+                FILE *f,
+                JsonVariant **ret_records) {
+
+        _cleanup_(json_variant_unrefp) JsonVariant *digests = NULL;
+        _cleanup_(evp_md_ctx_free_all) EVP_MD_CTX *mdctx[TPM2_N_HASH_ALGORITHMS] = {};
+        int r;
+
+        assert(f);
+        assert(ret_records);
+
+        for (size_t i = 0; i < TPM2_N_HASH_ALGORITHMS; i++) {
+                const char *a;
+                const EVP_MD *md;
+
+                assert_se(a = tpm2_hash_alg_to_string(tpm2_hash_algorithms[i]));
+                assert_se(md = EVP_get_digestbyname(a));
+
+                mdctx[i] = EVP_MD_CTX_new();
+                if (!mdctx[i])
+                        return log_oom();
+
+                if (EVP_DigestInit_ex(mdctx[i], md, NULL) != 1)
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                               "Failed to initialize message digest for %s.", a);
+        }
+
+        for (;;) {
+                uint8_t buffer[64*1024];
+                size_t n;
+
+                n = fread(buffer, 1, sizeof(buffer), f);
+                if (ferror(f))
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE), "Failed to read file: %m");
+                if (n == 0 && feof(f))
+                        break;
+
+                for (size_t i = 0; i < TPM2_N_HASH_ALGORITHMS; i++)
+                        if (EVP_DigestUpdate(mdctx[i], buffer, n) != 1)
+                                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE), "Unable to hash data.");
+        }
+
+        for (size_t i = 0; i < TPM2_N_HASH_ALGORITHMS; i++) {
+                const char *a;
+                int hash_ssize;
+                unsigned hash_usize;
+
+                assert_se(a = tpm2_hash_alg_to_string(tpm2_hash_algorithms[i]));
+                hash_ssize = EVP_MD_CTX_size(mdctx[i]);
+                assert(hash_ssize > 0 && hash_ssize <= EVP_MAX_MD_SIZE);
+                hash_usize = hash_ssize;
+                unsigned char hash[hash_usize];
+
+                if (EVP_DigestFinal_ex(mdctx[i], hash, &hash_usize) != 1)
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                               "Failed to finalize hash context for algorithn '%s'.", a);
+
+                r = json_variant_append_arrayb(
+                                &digests,
+                                JSON_BUILD_OBJECT(
+                                                JSON_BUILD_PAIR("hashAlg", JSON_BUILD_STRING(a)),
+                                                JSON_BUILD_PAIR("digest", JSON_BUILD_HEX(hash, hash_usize))));
+                if (r < 0)
+                        return log_error_errno(r, "Failed to build JSON digest object: %m");
+        }
+
+        for (uint32_t i = 0; i < TPM2_PCRS_MAX; i++) {
+                _cleanup_(json_variant_unrefp) JsonVariant *record = NULL;
+
+                if (!FLAGS_SET(pcr_mask, UINT32_C(1) << i))
+                        continue;
+
+                r = json_build(&record,
+                               JSON_BUILD_OBJECT(
+                                               JSON_BUILD_PAIR("pcr", JSON_BUILD_UNSIGNED(i)),
+                                               JSON_BUILD_PAIR("digests", JSON_BUILD_VARIANT(digests))));
+                if (r < 0)
+                        return log_error_errno(r, "Failed to build record object: %m");
+
+                r = json_variant_append_array(ret_records, record);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to append to JSON array: %m");
+        }
 
         return 0;
 }
@@ -2754,10 +2866,8 @@ static int unlink_pcrlock(const char *default_pcrlock_path) {
 }
 
 static int verb_lock_raw(int argc, char *argv[], void *userdata) {
-        _cleanup_(json_variant_unrefp) JsonVariant *array = NULL;
-        _cleanup_free_ char *data = NULL;
+        _cleanup_(json_variant_unrefp) JsonVariant *records = NULL;
         _cleanup_fclose_ FILE *f = NULL;
-        size_t size;
         int r;
 
         if (arg_pcr_mask == 0)
@@ -2769,26 +2879,11 @@ static int verb_lock_raw(int argc, char *argv[], void *userdata) {
                         return log_error_errno(errno, "Failed to open '%s': %m", argv[1]);
         }
 
-        r = read_full_stream(f ?: stdin, &data, &size);
+        r = make_pcrlock_record_from_stream(arg_pcr_mask, f ?: stdin, &records);
         if (r < 0)
-                return log_error_errno(r, "Failed to read data from stdin: %m");
+                return r;
 
-        for (uint32_t i = 0; i < TPM2_PCRS_MAX; i++) {
-                _cleanup_(json_variant_unrefp) JsonVariant *record = NULL;
-
-                if (!FLAGS_SET(arg_pcr_mask, UINT32_C(1) << i))
-                        continue;
-
-                r = make_pcrlock_record(i, data, size, &record);
-                if (r < 0)
-                        return r;
-
-                r = json_variant_append_array(&array, record);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to append to JSON array: %m");
-        }
-
-        return write_pcrlock(array, NULL);
+        return write_pcrlock(records, NULL);
 }
 
 static int verb_unlock_simple(int argc, char *argv[], void *userdata) {
@@ -2816,7 +2911,7 @@ static int verb_lock_secureboot_policy(int argc, char *argv[], void *userdata) {
         /* Generates expected records from the current SecureBoot state, as readable in the EFI variables
          * right now. */
 
-        FOREACH_ARRAY(vv, variables, ELEMENTSOF(variables)) {
+        FOREACH_ELEMENT(vv, variables) {
                 _cleanup_(json_variant_unrefp) JsonVariant *record = NULL;
 
                 _cleanup_free_ char *name = NULL;
@@ -3796,10 +3891,9 @@ static int verb_unlock_kernel_cmdline(int argc, char *argv[], void *userdata) {
 }
 
 static int verb_lock_kernel_initrd(int argc, char *argv[], void *userdata) {
-        _cleanup_(json_variant_unrefp) JsonVariant *record = NULL, *array = NULL;
-        _cleanup_free_ void *data = NULL;
+        _cleanup_(json_variant_unrefp) JsonVariant *records = NULL;
         _cleanup_fclose_ FILE *f = NULL;
-        size_t size;
+        uint32_t pcr_mask = UINT32_C(1) << TPM2_PCR_KERNEL_INITRD;
         int r;
 
         if (argc >= 2) {
@@ -3808,19 +3902,11 @@ static int verb_lock_kernel_initrd(int argc, char *argv[], void *userdata) {
                         return log_error_errno(errno, "Failed to open '%s': %m", argv[1]);
         }
 
-        r = read_full_stream(f ?: stdin, (char**) &data, &size);
-        if (r < 0)
-                return log_error_errno(r, "Failed to read data from stdin: %m");
-
-        r = make_pcrlock_record(TPM2_PCR_KERNEL_INITRD /* = 9 */, data, size, &record);
+        r = make_pcrlock_record_from_stream(pcr_mask, f ?: stdin, &records);
         if (r < 0)
                 return r;
 
-        r = json_variant_new_array(&array, &record, 1);
-        if (r < 0)
-                return log_error_errno(r, "Failed to create record array: %m");
-
-        r = write_pcrlock(array, PCRLOCK_KERNEL_INITRD_PATH);
+        r = write_pcrlock(records, PCRLOCK_KERNEL_INITRD_PATH);
         if (r < 0)
                 return r;
 
@@ -4320,7 +4406,7 @@ static int write_boot_policy_file(const char *json_text) {
         return 1;
 }
 
-static int make_policy(bool force, bool recovery_pin) {
+static int make_policy(bool force, RecoveryPinMode recovery_pin_mode) {
         int r;
 
         /* Here's how this all works: after predicting all possible PCR values for next boot (with
@@ -4404,9 +4490,9 @@ static int make_policy(bool force, bool recovery_pin) {
         }
 
         _cleanup_(tpm2_context_unrefp) Tpm2Context *tc = NULL;
-        r = tpm2_context_new(NULL, &tc);
+        r = tpm2_context_new_or_warn(/* device= */ NULL, &tc);
         if (r < 0)
-                return log_error_errno(r, "Failed to allocate TPM2 context: %m");
+                return r;
 
         if (!tpm2_supports_command(tc, TPM2_CC_PolicyAuthorizeNV))
                 return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP), "TPM2 does not support PolicyAuthorizeNV command, refusing.");
@@ -4444,7 +4530,7 @@ static int make_policy(bool force, bool recovery_pin) {
 
         /* Acquire a recovery PIN, either from the user, or create a randomized one */
         _cleanup_(erase_and_freep) char *pin = NULL;
-        if (recovery_pin) {
+        if (recovery_pin_mode == RECOVERY_PIN_QUERY) {
                 r = getenv_steal_erase("PIN", &pin);
                 if (r < 0)
                         return log_error_errno(r, "Failed to acquire PIN from environment: %m");
@@ -4473,16 +4559,16 @@ static int make_policy(bool force, bool recovery_pin) {
                 }
 
         } else if (!have_old_policy) {
-                char rnd[256];
-
-                r = crypto_random_bytes(rnd, sizeof(rnd));
+                r = make_recovery_key(&pin);
                 if (r < 0)
                         return log_error_errno(r, "Failed to generate a randomized recovery PIN: %m");
 
-                (void) base64mem(rnd, sizeof(rnd), &pin);
-                explicit_bzero_safe(rnd, sizeof(rnd));
-                if (!pin)
-                        return log_oom();
+                if (recovery_pin_mode == RECOVERY_PIN_SHOW)
+                        printf("%s Selected recovery PIN is: %s%s%s\n",
+                               special_glyph(SPECIAL_GLYPH_LOCK_AND_KEY),
+                               ansi_highlight_cyan(),
+                               pin,
+                               ansi_normal());
         }
 
         _cleanup_(tpm2_handle_freep) Tpm2Handle *nv_handle = NULL;
@@ -4500,7 +4586,7 @@ static int make_policy(bool force, bool recovery_pin) {
         CLEANUP_ERASE(auth);
 
         if (pin) {
-                r = tpm2_get_pin_auth(TPM2_ALG_SHA256, pin, &auth);
+                r = tpm2_auth_value_from_pin(TPM2_ALG_SHA256, pin, &auth);
                 if (r < 0)
                         return log_error_errno(r, "Failed to hash PIN: %m");
         } else {
@@ -4567,15 +4653,28 @@ static int make_policy(bool force, bool recovery_pin) {
                 log_info("Retrieved PIN from TPM2 in %s.", FORMAT_TIMESPAN(usec_sub_unsigned(now(CLOCK_MONOTONIC), pin_start_usec), 1));
         }
 
-        TPM2B_NV_PUBLIC nv_public = {};
+        /* Now convert the PIN into an HMAC-SHA256 key that we can use in PolicySigned to protect access to the nvindex with */
+        _cleanup_(tpm2_handle_freep) Tpm2Handle *pin_handle = NULL;
+        r = tpm2_hmac_key_from_pin(tc, encryption_session, &auth, &pin_handle);
+        if (r < 0)
+                return r;
 
+        TPM2B_NV_PUBLIC nv_public = {};
         usec_t nv_index_start_usec = now(CLOCK_MONOTONIC);
 
         if (!iovec_is_set(&nv_blob)) {
-                TPM2B_DIGEST recovery_policy_digest = TPM2B_DIGEST_MAKE(NULL, TPM2_SHA256_DIGEST_SIZE);
-                r = tpm2_calculate_policy_auth_value(&recovery_policy_digest);
+                _cleanup_(Esys_Freep) TPM2B_NAME *pin_name = NULL;
+                r = tpm2_get_name(
+                                tc,
+                                pin_handle,
+                                &pin_name);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to calculate authentication value policy: %m");
+                        return log_error_errno(r, "Failed to get name of PIN from TPM2: %m");
+
+                TPM2B_DIGEST recovery_policy_digest = TPM2B_DIGEST_MAKE(NULL, TPM2_SHA256_DIGEST_SIZE);
+                r = tpm2_calculate_policy_signed(&recovery_policy_digest, pin_name);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to calculate PolicySigned policy: %m");
 
                 log_debug("Allocating NV index to write PCR policy to...");
                 r = tpm2_define_policy_nv_index(
@@ -4583,8 +4682,6 @@ static int make_policy(bool force, bool recovery_pin) {
                                 encryption_session,
                                 arg_nv_index,
                                 &recovery_policy_digest,
-                                pin,
-                                &auth,
                                 &nv_index,
                                 &nv_handle,
                                 &nv_public);
@@ -4593,10 +4690,6 @@ static int make_policy(bool force, bool recovery_pin) {
                 if (r < 0)
                         return log_error_errno(r, "Failed to allocate NV index: %m");
         }
-
-        r = tpm2_set_auth_binary(tc, nv_handle, &auth);
-        if (r < 0)
-                return log_error_errno(r, "Failed to set authentication value on NV index: %m");
 
         _cleanup_(tpm2_handle_freep) Tpm2Handle *policy_session = NULL;
         r = tpm2_make_policy_session(
@@ -4607,9 +4700,11 @@ static int make_policy(bool force, bool recovery_pin) {
         if (r < 0)
                 return log_error_errno(r, "Failed to allocate policy session: %m");
 
-        r = tpm2_policy_auth_value(
+        r = tpm2_policy_signed_hmac_sha256(
                         tc,
                         policy_session,
+                        pin_handle,
+                        &IOVEC_MAKE(auth.buffer, auth.size),
                         /* ret_policy_digest= */ NULL);
         if (r < 0)
                 return log_error_errno(r, "Failed to submit authentication value policy: %m");
@@ -4741,7 +4836,7 @@ static int undefine_policy_nv_index(
         assert(srk_blob);
 
         _cleanup_(tpm2_context_unrefp) Tpm2Context *tc = NULL;
-        r = tpm2_context_new(NULL, &tc);
+        r = tpm2_context_new_or_warn(/* device= */ NULL, &tc);
         if (r < 0)
                 return r;
 
@@ -5044,9 +5139,9 @@ static int parse_argv(int argc, char *argv[]) {
                 }
 
                 case ARG_RECOVERY_PIN:
-                        r = parse_boolean_argument("--recovery-pin", optarg, &arg_recovery_pin);
-                        if (r < 0)
-                                return r;
+                        arg_recovery_pin = recovery_pin_mode_from_string(optarg);
+                        if (arg_recovery_pin < 0)
+                                return log_error_errno(arg_recovery_pin, "Failed to parse --recovery-pin= mode: %s", optarg);
                         break;
 
                 case ARG_PCRLOCK:
@@ -5210,7 +5305,7 @@ static int vl_method_make_policy(Varlink *link, JsonVariant *parameters, Varlink
         if (r != 0)
                 return r;
 
-        r = make_policy(p.force, /* recovery_key= */ false);
+        r = make_policy(p.force, /* recovery_key= */ RECOVERY_PIN_HIDE);
         if (r < 0)
                 return r;
         if (r == 0)

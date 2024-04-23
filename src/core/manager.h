@@ -121,7 +121,7 @@ typedef enum ManagerTimestamp {
         MANAGER_TIMESTAMP_INITRD_UNITS_LOAD_START,
         MANAGER_TIMESTAMP_INITRD_UNITS_LOAD_FINISH,
 
-        MANAGER_TIMESTAMP_SOFTREBOOT_START,
+        MANAGER_TIMESTAMP_SHUTDOWN_START,
 
         _MANAGER_TIMESTAMP_MAX,
         _MANAGER_TIMESTAMP_INVALID = -EINVAL,
@@ -379,6 +379,8 @@ struct Manager {
         bool etc_localtime_accessible;
 
         ManagerObjective objective;
+        /* Objective as it was before serialization, mostly to detect soft-reboots */
+        ManagerObjective previous_objective;
 
         /* Flags */
         bool dispatching_load_queue;
@@ -625,13 +627,16 @@ void manager_restore_original_log_level(Manager *m);
 void manager_override_log_target(Manager *m, LogTarget target);
 void manager_restore_original_log_target(Manager *m);
 
-const char *manager_state_to_string(ManagerState m) _const_;
-ManagerState manager_state_from_string(const char *s) _pure_;
-
-const char *manager_get_confirm_spawn(Manager *m);
+const char* manager_get_confirm_spawn(Manager *m);
 void manager_disable_confirm_spawn(void);
 
-const char *manager_timestamp_to_string(ManagerTimestamp m) _const_;
+const char* manager_state_to_string(ManagerState m) _const_;
+ManagerState manager_state_from_string(const char *s) _pure_;
+
+const char* manager_objective_to_string(ManagerObjective m) _const_;
+ManagerObjective manager_objective_from_string(const char *s) _pure_;
+
+const char* manager_timestamp_to_string(ManagerTimestamp m) _const_;
 ManagerTimestamp manager_timestamp_from_string(const char *s) _pure_;
 ManagerTimestamp manager_timestamp_initrd_mangle(ManagerTimestamp s);
 

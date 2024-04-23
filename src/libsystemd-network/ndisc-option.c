@@ -180,6 +180,7 @@ static void ndisc_option_hash_func(const sd_ndisc_option *option, struct siphash
         case SD_NDISC_OPTION_TARGET_LL_ADDRESS:
         case SD_NDISC_OPTION_REDIRECTED_HEADER:
         case SD_NDISC_OPTION_MTU:
+        case SD_NDISC_OPTION_HOME_AGENT:
         case SD_NDISC_OPTION_FLAGS_EXTENSION:
         case SD_NDISC_OPTION_CAPTIVE_PORTAL:
                 break;
@@ -350,7 +351,9 @@ int ndisc_option_add_prefix_internal(
         struct in6_addr addr = *address;
         in6_addr_mask(&addr, prefixlen);
 
-        if (in6_addr_is_link_local(&addr) || in6_addr_is_null(&addr))
+        /* RFC 4861 and 4862 only state that link-local prefix should be ignored.
+         * But here we also ignore null and multicast addresses. */
+        if (in6_addr_is_link_local(&addr) || in6_addr_is_null(&addr) || in6_addr_is_multicast(&addr))
                 return -EINVAL;
 
         if (preferred_lifetime > valid_lifetime)
@@ -1397,7 +1400,7 @@ int ndisc_option_get_mac(Set *options, uint8_t type, struct ether_addr *ret) {
         return 0;
 }
 
-int ndisc_send(int fd, const struct sockaddr_in6 *dst, const struct icmp6_hdr *hdr, Set *options, usec_t timestamp) {
+int ndisc_send(int fd, const struct in6_addr *dst, const struct icmp6_hdr *hdr, Set *options, usec_t timestamp) {
         int r;
 
         assert(fd >= 0);

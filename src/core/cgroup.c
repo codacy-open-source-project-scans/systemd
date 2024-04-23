@@ -2866,6 +2866,9 @@ static int unit_update_cgroup(
         if (!UNIT_HAS_CGROUP_CONTEXT(u))
                 return 0;
 
+        if (u->freezer_state != FREEZER_RUNNING)
+                return log_unit_error_errno(u, SYNTHETIC_ERRNO(EBUSY), "Cannot realize cgroup for frozen unit.");
+
         /* Figure out our cgroup path */
         r = unit_pick_cgroup_path(u);
         if (r < 0)
@@ -4918,7 +4921,7 @@ void unit_reset_memory_accounting_last(Unit *u) {
         if (!crt || !crt->cgroup_path)
                 return;
 
-        FOREACH_ARRAY(i, crt->memory_accounting_last, ELEMENTSOF(crt->memory_accounting_last))
+        FOREACH_ELEMENT(i, crt->memory_accounting_last)
                 *i = UINT64_MAX;
 }
 
@@ -5126,11 +5129,14 @@ int unit_cgroup_freezer_action(Unit *u, FreezerAction action) {
         if (!cg_freezer_supported())
                 return 0;
 
-        CGroupRuntime *crt = unit_get_cgroup_runtime(u);
-        if (!crt || !crt->cgroup_realized)
-                return 0; /* No cgroup = nothing running to freeze */
-
         unit_next_freezer_state(u, action, &next, &target);
+
+        CGroupRuntime *crt = unit_get_cgroup_runtime(u);
+        if (!crt || !crt->cgroup_realized) {
+                /* No realized cgroup = nothing to freeze */
+                u->freezer_state = freezer_state_finish(next);
+                return 0;
+        }
 
         r = unit_cgroup_freezer_kernel_state(u, &current);
         if (r < 0)
@@ -5226,13 +5232,13 @@ CGroupRuntime *cgroup_runtime_new(void) {
                 .cgroup_invalidated_mask = _CGROUP_MASK_ALL,
         };
 
-        FOREACH_ARRAY(i, crt->memory_accounting_last, ELEMENTSOF(crt->memory_accounting_last))
+        FOREACH_ELEMENT(i, crt->memory_accounting_last)
                 *i = UINT64_MAX;
-        FOREACH_ARRAY(i, crt->io_accounting_base, ELEMENTSOF(crt->io_accounting_base))
+        FOREACH_ELEMENT(i, crt->io_accounting_base)
                 *i = UINT64_MAX;
-        FOREACH_ARRAY(i, crt->io_accounting_last, ELEMENTSOF(crt->io_accounting_last))
+        FOREACH_ELEMENT(i, crt->io_accounting_last)
                 *i = UINT64_MAX;
-        FOREACH_ARRAY(i, crt->ip_accounting_extra, ELEMENTSOF(crt->ip_accounting_extra))
+        FOREACH_ELEMENT(i, crt->ip_accounting_extra)
                 *i = UINT64_MAX;
 
         return TAKE_PTR(crt);
