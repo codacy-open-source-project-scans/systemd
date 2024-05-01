@@ -80,7 +80,7 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --tpm2-device=PATH  Use specified TPM2 device\n"
                "     --private-key=KEY   Private key (PEM) to sign with\n"
                "     --private-key-source=file|provider:PROVIDER|engine:ENGINE\n"
-               "                         Specify how to use the --private-key=. Allows to use\n"
+               "                         Specify how to use the --private-key=. Allows one to use\n"
                "                         an OpenSSL engine/provider when signing\n"
                "     --public-key=KEY    Public key (PEM) to validate against\n"
                "     --certificate=PATH  PEM certificate to use when signing with a URI\n"
@@ -1160,9 +1160,7 @@ static int measure_main(int argc, char *argv[]) {
 static int run(int argc, char *argv[]) {
         int r;
 
-        log_show_color(true);
-        log_parse_environment();
-        log_open();
+        log_setup();
 
         r = parse_argv(argc, argv);
         if (r <= 0)

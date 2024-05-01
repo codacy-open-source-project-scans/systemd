@@ -1610,7 +1610,7 @@ static int acquire_invocation_id(sd_bus *bus, const char *unit, sd_id128_t *ret)
         if (r < 0)
                 return bus_log_parse_error(r);
 
-        return 0;
+        return r; /* Return true when we get a non-null invocation ID. */
 }
 
 static void set_window_title(PTYForward *f) {
@@ -2320,9 +2320,7 @@ static int run(int argc, char* argv[]) {
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         int r;
 
-        log_show_color(true);
-        log_parse_environment();
-        log_open();
+        log_setup();
 
         if (invoked_as(argv, "run0"))
                 r = parse_argv_sudo_mode(argc, argv);

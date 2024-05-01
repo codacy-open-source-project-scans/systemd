@@ -40,6 +40,7 @@
 #include "string-util.h"
 #include "strv.h"
 #include "syslog-util.h"
+#include "taint.h"
 #include "user-util.h"
 #include "version.h"
 #include "virt.h"
@@ -126,13 +127,10 @@ static int property_get_tainted(
                 void *userdata,
                 sd_bus_error *error) {
 
-        _cleanup_free_ char *s = NULL;
-        Manager *m = ASSERT_PTR(userdata);
-
         assert(bus);
         assert(reply);
 
-        s = manager_taint_string(m);
+        _cleanup_free_ char *s = taint_string();
         if (!s)
                 return log_oom();
 
@@ -1407,11 +1405,11 @@ static int dump_impl(
                  * operations, and can cause PID1 to stall. So it seems similar enough in terms of security
                  * considerations and impact, and thus use the same access check for dumps which, given the
                  * large amount of data to fetch, can stall PID1 for quite some time. */
-                r = mac_selinux_access_check(message, "reload", error);
+                r = mac_selinux_access_check(message, "reload", /* error = */ NULL);
                 if (r < 0)
                         goto ratelimited;
 
-                r = bus_verify_bypass_dump_ratelimit_async(m, message, error);
+                r = bus_verify_bypass_dump_ratelimit_async(m, message, /* error = */ NULL);
                 if (r < 0)
                         goto ratelimited;
                 if (r == 0)
@@ -2934,7 +2932,7 @@ static int aux_scope_from_message(Manager *m, sd_bus_message *message, Unit **re
 
                 unit = manager_get_unit_by_pidref(m, &p);
                 if (!unit) {
-                        log_unit_warning_errno(from, SYNTHETIC_ERRNO(ENOENT), "Failed to get unit from PIDFD, ignoring: %m");
+                        log_unit_warning(from, "Failed to get unit from PIDFD, ignoring.");
                         continue;
                 }
 

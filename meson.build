@@ -13,8 +13,8 @@ project('systemd', 'c',
         meson_version : '>= 0.60.0',
        )
 
-libsystemd_version = '0.38.0'
-libudev_version = '1.7.8'
+libsystemd_version = '0.39.0'
+libudev_version = '1.7.9'
 
 conf = configuration_data()
 conf.set_quoted('PROJECT_URL', 'https://systemd.io/')
@@ -321,6 +321,7 @@ meson_build_sh = find_program('tools/meson-build.sh')
 want_tests = get_option('tests')
 slow_tests = want_tests != 'false' and get_option('slow-tests')
 fuzz_tests = want_tests != 'false' and get_option('fuzz-tests')
+integration_tests = want_tests != 'false' and get_option('integration-tests')
 install_tests = want_tests != 'false' and get_option('install-tests')
 
 if add_languages('cpp', native : false, required : fuzzer_build)
@@ -1055,7 +1056,7 @@ bpf_framework = get_option('bpf-framework')
 bpf_compiler = get_option('bpf-compiler')
 libbpf = dependency('libbpf',
                     required : bpf_framework,
-                    version : bpf_compiler == 'gcc' ? '>= 1.0.0' : '>= 0.1.0')
+                    version : bpf_compiler == 'gcc' ? '>= 1.4.0' : '>= 0.1.0')
 conf.set10('HAVE_LIBBPF', libbpf.found())
 
 if not libbpf.found()
@@ -1716,6 +1717,24 @@ if conf.get('BPF_FRAMEWORK') == 1
                 '-c',
         ]
 
+        # If c_args contains these flags copy them along with the values, in order to avoid breaking
+        # reproducible builds and other functionality
+        propagate_cflags = [
+                '-ffile-prefix-map=',
+                '-fdebug-prefix-map=',
+                '-fmacro-prefix-map=',
+        ]
+
+        foreach opt : c_args
+                foreach flag : propagate_cflags
+                        if opt.startswith(flag)
+                                bpf_clang_flags += [opt]
+                                bpf_gcc_flags += [opt]
+                                break
+                        endif
+                endforeach
+        endforeach
+
         # Generate defines that are appropriate to tell the compiler what architecture
         # we're compiling for. By default we just map meson's cpu_family to __<cpu_family>__.
         # This dictionary contains the exceptions where this doesn't work.
@@ -1728,6 +1747,7 @@ if conf.get('BPF_FRAMEWORK') == 1
                 'riscv32' : ['-D__riscv', '-D__riscv_xlen=32'],
                 'riscv64' : ['-D__riscv', '-D__riscv_xlen=64'],
                 'x86'     : ['-D__i386__'],
+                's390x'   : ['-D__s390__', '-D__s390x__'],
 
                 # For arm, assume hardware fp is available.
                 'arm'     : ['-D__arm__', '-D__ARM_PCS_VFP'],
@@ -2574,6 +2594,18 @@ endif
 #####################################################################
 
 mkosi = find_program('mkosi', required : false)
+if integration_tests and not mkosi.found()
+        error('Could not find mkosi which is required to run the integration tests')
+endif
+
+mkosi_depends = public_programs
+
+foreach executable : ['systemd-journal-remote', 'systemd-measure']
+        if executable in executables_by_name
+                mkosi_depends += [executables_by_name[executable]]
+        endif
+endforeach
+
 if mkosi.found()
         custom_target('mkosi',
                 build_always_stale : true,
@@ -2587,13 +2619,10 @@ if mkosi.found()
                         '--cache-dir', meson.current_build_dir() / 'mkosi.cache',
                         '--build-dir', meson.current_build_dir() / 'mkosi.builddir',
                         '--force',
-                        'build'
+                        '--debug',
+                        'build',
                 ],
-                depends : public_programs + [
-                        executables_by_name['systemd-journal-remote'],
-                        executables_by_name['systemd-measure'],
-                        ukify,
-                ],
+                depends : mkosi_depends,
         )
 endif
 

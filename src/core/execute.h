@@ -91,7 +91,7 @@ typedef enum ExecKeyringMode {
 struct ExecStatus {
         dual_timestamp start_timestamp;
         dual_timestamp exit_timestamp;
-        dual_timestamp handover_timestamp;
+        dual_timestamp handoff_timestamp;
         pid_t pid;
         int code;     /* as in siginfo_t::si_code */
         int status;   /* as in siginfo_t::si_status */
@@ -200,7 +200,6 @@ struct ExecContext {
         bool nice_set:1;
         bool ioprio_set:1;
         bool cpu_sched_set:1;
-        bool mount_apivfs_set:1;
 
         /* This is not exposed to the user but available internally. We need it to make sure that whenever we
          * spawn /usr/bin/mount it is run in the same process group as us so that the autofs logic detects
@@ -313,6 +312,7 @@ struct ExecContext {
         ProcSubset proc_subset;    /* subset= */
 
         int private_mounts;
+        int mount_apivfs;
         int memory_ksm;
         bool private_tmp;
         bool private_network;
@@ -327,7 +327,6 @@ struct ExecContext {
         ProtectSystem protect_system;
         ProtectHome protect_home;
         bool protect_hostname;
-        bool mount_apivfs;
 
         bool dynamic_user;
         bool remove_ipc;
@@ -444,9 +443,7 @@ struct ExecParameters {
         int stdout_fd;
         int stderr_fd;
 
-        /* An fd that is closed by the execve(), and thus will result in EOF when the execve() is done. It
-         * will also be used to send a timestamp taken as the very last operation before execve, for
-         * tracking purposes. */
+        /* An fd that is closed by the execve(), and thus will result in EOF when the execve() is done. */
         int exec_fd;
 
         char *notify_socket;
@@ -457,6 +454,7 @@ struct ExecParameters {
 
         char **files_env;
         int user_lookup_fd;
+        int handoff_timestamp_fd;
 
         int bpf_restrict_fs_map_fd;
 
@@ -475,6 +473,7 @@ struct ExecParameters {
                 .exec_fd                = -EBADF, \
                 .bpf_restrict_fs_map_fd = -EBADF, \
                 .user_lookup_fd         = -EBADF, \
+                .handoff_timestamp_fd   = -EBADF, \
         }
 
 #include "unit.h"
@@ -497,6 +496,7 @@ void exec_command_free_array(ExecCommand **c, size_t n);
 void exec_command_reset_status_array(ExecCommand *c, size_t n);
 void exec_command_reset_status_list_array(ExecCommand **c, size_t n);
 
+void exec_command_dump(ExecCommand *c, FILE *f, const char *prefix);
 void exec_command_dump_list(ExecCommand *c, FILE *f, const char *prefix);
 void exec_command_append_list(ExecCommand **l, ExecCommand *e);
 int exec_command_set(ExecCommand *c, const char *path, ...) _sentinel_;
@@ -544,6 +544,7 @@ char** exec_context_get_restrict_filesystems(const ExecContext *c);
 
 void exec_status_start(ExecStatus *s, pid_t pid);
 void exec_status_exit(ExecStatus *s, const ExecContext *context, pid_t pid, int code, int status);
+void exec_status_handoff(ExecStatus *s, const struct ucred *ucred, const dual_timestamp *ts);
 void exec_status_dump(const ExecStatus *s, FILE *f, const char *prefix);
 void exec_status_reset(ExecStatus *s);
 
@@ -632,8 +633,8 @@ bool exec_needs_ipc_namespace(const ExecContext *context);
                 const ExecContext *_c = (ec);                                     \
                 const ExecParameters *_p = (ep);                                  \
                 const int _l = (level);                                           \
-                bool _do_log = _c->log_level_max >= 0 &&                          \
-                               _c->log_level_max < LOG_PRI(_l);                   \
+                bool _do_log = _c->log_level_max < 0 ||                           \
+                               _c->log_level_max >= LOG_PRI(_l);                  \
                 LOG_CONTEXT_PUSH_IOV(_c->log_extra_fields,                        \
                                      _c->n_log_extra_fields);                     \
                 !_do_log ? -ERRNO_VALUE(error) :                                  \
@@ -670,8 +671,8 @@ bool exec_needs_ipc_namespace(const ExecContext *context);
                 const ExecContext *_c = (ec);                                     \
                 const ExecParameters *_p = (ep);                                  \
                 const int _l = (level);                                           \
-                bool _do_log = _c->log_level_max >= 0 &&                          \
-                               _c->log_level_max < LOG_PRI(_l);                   \
+                bool _do_log = _c->log_level_max < 0 ||                           \
+                               _c->log_level_max >= LOG_PRI(_l);                  \
                 LOG_CONTEXT_PUSH_IOV(_c->log_extra_fields,                        \
                                      _c->n_log_extra_fields);                     \
                 !_do_log ? -ERRNO_VALUE(error) :                                  \

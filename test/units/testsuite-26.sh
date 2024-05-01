@@ -12,14 +12,9 @@ at_exit() {
         rm -fvr "/usr/lib/systemd/system/$UNIT_NAME" "/etc/systemd/system/$UNIT_NAME.d" "+4"
     fi
 
-    maybe_umount_usr_overlay
-
     rm -f /etc/init.d/issue-24990
     return 0
 }
-
-maybe_mount_usr_overlay
-trap at_exit EXIT
 
 # Create a simple unit file for testing
 # Note: the service file is created under /usr on purpose to test
@@ -146,7 +141,7 @@ systemctl reload -T "$UNIT_NAME"
 systemctl restart -T "$UNIT_NAME"
 systemctl try-restart --show-transaction "$UNIT_NAME"
 systemctl try-reload-or-restart --show-transaction "$UNIT_NAME"
-systemctl kill "$UNIT_NAME"
+timeout 10 systemctl kill --wait "$UNIT_NAME"
 (! systemctl is-active "$UNIT_NAME")
 systemctl restart "$UNIT_NAME"
 systemctl is-active "$UNIT_NAME"
@@ -384,6 +379,10 @@ if [[ -x /usr/lib/systemd/system-generators/systemd-sysv-generator ]]; then
     # This is configurable via -Dsysvinit-path=, but we can't get the value
     # at runtime, so let's just support the two most common paths for now.
     [[ -d /etc/rc.d/init.d ]] && SYSVINIT_PATH="/etc/rc.d/init.d" || SYSVINIT_PATH="/etc/init.d"
+
+    # OpenSUSE leaves sysvinit-path enabled, which means systemd-sysv-generator is built
+    # but may not create the directory if there's no services that use it.
+    mkdir -p "$SYSVINIT_PATH"
 
     # invalid dependency
     cat >"${SYSVINIT_PATH:?}/issue-24990" <<\EOF

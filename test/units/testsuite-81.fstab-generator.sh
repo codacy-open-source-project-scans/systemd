@@ -13,6 +13,7 @@ OUT_DIR="$(mktemp -d /tmp/fstab-generator.XXX)"
 FSTAB="$(mktemp)"
 
 at_exit() {
+    mountpoint -q /proc/cmdline && umount /proc/cmdline
     rm -fr "${OUT_DIR:?}" "${FSTAB:?}"
 }
 
@@ -325,7 +326,7 @@ SYSTEMD_IN_INITRD=1 SYSTEMD_FSTAB=/dev/null SYSTEMD_SYSROOT_FSTAB="$FSTAB" check
 
 # Check the default stuff that we (almost) always create in initrd
 : "fstab-generator: initrd default"
-SYSTEMD_IN_INITRD=1 SYSTEMD_FSTAB=/dev/null SYSTEMD_SYSROOT_FSTAB=/dev/null run_and_list "$GENERATOR_BIN" "$OUT_DIR"
+SYSTEMD_PROC_CMDLINE="root=/dev/sda2" SYSTEMD_IN_INITRD=1 SYSTEMD_FSTAB=/dev/null SYSTEMD_SYSROOT_FSTAB=/dev/null run_and_list "$GENERATOR_BIN" "$OUT_DIR"
 test -e "$OUT_DIR/normal/sysroot.mount"
 test -e "$OUT_DIR/normal/systemd-fsck-root.service"
 link_eq "$OUT_DIR/normal/initrd-root-fs.target.requires/sysroot.mount" "../sysroot.mount"
@@ -347,7 +348,7 @@ cat "$FSTAB"
 printf "%s\n" "${FSTAB_INVALID[@]}" >"$FSTAB"
 cat "$FSTAB"
 # Don't care about the exit code here
-SYSTEMD_FSTAB="$FSTAB" run_and_list "$GENERATOR_BIN" "$OUT_DIR" || :
+SYSTEMD_PROC_CMDLINE="" SYSTEMD_FSTAB="$FSTAB" run_and_list "$GENERATOR_BIN" "$OUT_DIR" || :
 # No mounts should get created here
 [[ "$(find "$OUT_DIR" -name "*.mount" | wc -l)" -eq 0 ]]
 

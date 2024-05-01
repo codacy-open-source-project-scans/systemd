@@ -38,11 +38,16 @@ ExecStart=false
 
 
 def main():
+    if not bool(int(os.getenv("SYSTEMD_INTEGRATION_TESTS", "0"))):
+        print("SYSTEMD_INTEGRATION_TESTS=1 not found in environment, skipping", file=sys.stderr)
+        exit(77)
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--meson-source-dir', required=True, type=Path)
     parser.add_argument('--meson-build-dir', required=True, type=Path)
     parser.add_argument('--test-name', required=True)
     parser.add_argument('--test-number', required=True)
+    parser.add_argument('--storage', required=True)
     parser.add_argument('mkosi_args', nargs="*")
     args = parser.parse_args()
 
@@ -64,6 +69,7 @@ def main():
             """
             [Unit]
             SuccessAction=exit
+            SuccessActionExitStatus=123
             FailureAction=exit
             """
         )
@@ -75,6 +81,7 @@ def main():
 
     cmd = [
         'mkosi',
+        '--debug',
         '--directory', os.fspath(args.meson_source_dir),
         '--output-dir', os.fspath(args.meson_build_dir / 'mkosi.output'),
         '--extra-search-path', os.fspath(args.meson_build_dir),
@@ -87,28 +94,41 @@ def main():
                 f"systemd.extra-unit.emergency-exit.service={shlex.quote(EMERGENCY_EXIT_SERVICE)}",
                 '--credential',
                 f"systemd.unit-dropin.emergency.target={shlex.quote(EMERGENCY_EXIT_DROPIN)}",
-                '--kernel-command-line-extra=systemd.mask=serial-getty@.service',
             ]
             if not sys.stderr.isatty()
             else []
         ),
         '--credential',
         f"systemd.unit-dropin.{test_unit}={shlex.quote(dropin)}",
+        '--runtime-network=none',
+        '--runtime-scratch=no',
         '--append',
         '--kernel-command-line-extra',
         ' '.join([
             'systemd.hostname=H',
             f"SYSTEMD_UNIT_PATH=/usr/lib/systemd/tests/testdata/testsuite-{args.test_number}.units:/usr/lib/systemd/tests/testdata/units:",
             f"systemd.unit={test_unit}",
+            'systemd.mask=systemd-networkd-wait-online.service',
+            *(
+                [
+                    "systemd.mask=serial-getty@.service",
+                    "systemd.show_status=no",
+                    "systemd.crash_shell=0",
+                    "systemd.crash_action=poweroff",
+                ]
+                if not sys.stderr.isatty()
+                else []
+            ),
         ]),
+        '--credential', f"journal.storage={'persistent' if sys.stderr.isatty() else args.storage}" ,
         *args.mkosi_args,
         'qemu',
     ]
 
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        if e.returncode != 77 and journal_file:
+    result = subprocess.run(cmd)
+    # Return code 123 is the expected success code
+    if result.returncode != (0 if sys.stderr.isatty() else 123):
+        if result.returncode != 77 and journal_file:
             cmd = [
                 'journalctl',
                 '--no-hostname',
@@ -119,7 +139,7 @@ def main():
             ]
             print("Test failed, relevant logs can be viewed with: \n\n"
                   f"{shlex.join(str(a) for a in cmd)}\n", file=sys.stderr)
-        exit(e.returncode)
+        exit(result.returncode or 1)
 
     # Do not keep journal files for tests that don't fail.
     if journal_file:

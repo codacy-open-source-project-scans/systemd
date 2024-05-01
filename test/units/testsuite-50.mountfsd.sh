@@ -10,8 +10,10 @@ if [[ ! -f /usr/lib/systemd/system/systemd-mountfsd.socket ]] || \
    [[ ! -f /usr/lib/systemd/system/systemd-nsresourced.socket ]] || \
    ! command -v mksquashfs || \
    ! grep -q bpf /sys/kernel/security/lsm ||
-   ! find /usr/lib* -name libbpf.so.1 2>/dev/null | grep .; then
-    echo "Skipping mountnfsd/nsresourced tests"
+   ! find /usr/lib* -name libbpf.so.1 2>/dev/null | grep . || \
+   systemd-analyze compare-versions "$(uname -r)" lt 6.5 || \
+   systemd-analyze compare-versions "$(pkcheck --version | awk '{print $3}')" lt 124; then
+    echo "Skipping mountfsd/nsresourced tests"
     exit 0
 fi
 
@@ -43,18 +45,27 @@ SYSTEMD_REPART_OVERRIDE_FSTYPE=squashfs \
 systemd-dissect --rmdir --umount /tmp/unpriv/mount
 
 systemd-dissect --image-policy='root=unprotected:=absent+unused' /var/tmp/unpriv.raw
-systemd-dissect --image-policy='root=unprotected:=absent+unused' --mtree /var/tmp/unpriv.raw | tee /tmp/unpriv.raw.mtree
+systemd-dissect --image-policy='root=unprotected:=absent+unused' --mtree /var/tmp/unpriv.raw >/tmp/unpriv.raw.mtree
 
 # Run unpriv, should fail due to lack of privs
 (! runas testuser systemd-dissect /var/tmp/unpriv.raw)
 (! runas testuser systemd-dissect --mtree /var/tmp/unpriv.raw)
+
+if (SYSTEMD_LOG_TARGET=console varlinkctl call \
+        /run/systemd/userdb/io.systemd.NamespaceResource \
+        io.systemd.NamespaceResource.AllocateUserRange \
+        '{"name":"test-supported","size":65536,"userNamespaceFileDescriptor":0}' 2>&1 || true) |
+            grep -q "io.systemd.NamespaceResource.UserNamespaceInterfaceNotSupported"; then
+    echo "User namespace interface not supported, skipping mountfsd/nsresourced tests"
+    exit 0
+fi
 
 # Install key in keychain
 cp /tmp/test-50-unpriv-cert.crt /run/verity.d
 
 # Now run unpriv again, should be OK now.
 runas testuser systemd-dissect /var/tmp/unpriv.raw
-runas testuser systemd-dissect --mtree /var/tmp/unpriv.raw | tee /tmp/unpriv2.raw.mtree
+runas testuser systemd-dissect --mtree /var/tmp/unpriv.raw >/tmp/unpriv2.raw.mtree
 
 # Check that unpriv and priv run yielded same results
 cmp /tmp/unpriv.raw.mtree /tmp/unpriv2.raw.mtree
