@@ -353,17 +353,16 @@ static void log_command_line(Unit *unit, const char *msg, const char *executable
 
 static int exec_context_load_environment(const Unit *unit, const ExecContext *c, char ***l);
 
-int exec_spawn(Unit *unit,
-               ExecCommand *command,
-               const ExecContext *context,
-               ExecParameters *params,
-               ExecRuntime *runtime,
-               const CGroupContext *cgroup_context,
-               PidRef *ret) {
+int exec_spawn(
+                Unit *unit,
+                ExecCommand *command,
+                const ExecContext *context,
+                ExecParameters *params,
+                ExecRuntime *runtime,
+                const CGroupContext *cgroup_context,
+                PidRef *ret) {
 
-        char serialization_fd_number[DECIMAL_STR_MAX(int) + 1];
         _cleanup_free_ char *subcgroup_path = NULL, *max_log_levels = NULL, *executor_path = NULL;
-        _cleanup_(pidref_done) PidRef pidref = PIDREF_NULL;
         _cleanup_fdset_free_ FDSet *fdset = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         int r;
@@ -444,7 +443,15 @@ int exec_spawn(Unit *unit,
         if (r < 0)
                 return log_unit_error_errno(unit, r, "Failed to get executor path from fd: %m");
 
+        char serialization_fd_number[DECIMAL_STR_MAX(int)];
         xsprintf(serialization_fd_number, "%i", fileno(f));
+
+        _cleanup_(pidref_done) PidRef pidref = PIDREF_NULL;
+        dual_timestamp start_timestamp;
+
+        /* Record the start timestamp before we fork so that it is guaranteed to be earlier than the
+         * handoff timestamp. */
+        dual_timestamp_now(&start_timestamp);
 
         /* The executor binary is pinned, to avoid compatibility problems during upgrades. */
         r = posix_spawn_wrapper(
@@ -473,7 +480,7 @@ int exec_spawn(Unit *unit,
         log_unit_debug(unit, "Forked %s as " PID_FMT " (%s CLONE_INTO_CGROUP)",
                        command->path, pidref.pid, r > 0 ? "via" : "without");
 
-        exec_status_start(&command->exec_status, pidref.pid);
+        exec_status_start(&command->exec_status, pidref.pid, &start_timestamp);
 
         *ret = TAKE_PIDREF(pidref);
         return 0;
@@ -1816,14 +1823,17 @@ char** exec_context_get_restrict_filesystems(const ExecContext *c) {
         return l ? TAKE_PTR(l) : strv_new(NULL);
 }
 
-void exec_status_start(ExecStatus *s, pid_t pid) {
+void exec_status_start(ExecStatus *s, pid_t pid, const dual_timestamp *ts) {
         assert(s);
 
         *s = (ExecStatus) {
                 .pid = pid,
         };
 
-        dual_timestamp_now(&s->start_timestamp);
+        if (ts)
+                s->start_timestamp = *ts;
+        else
+                dual_timestamp_now(&s->start_timestamp);
 }
 
 void exec_status_exit(ExecStatus *s, const ExecContext *context, pid_t pid, int code, int status) {

@@ -4774,6 +4774,30 @@ static int make_subvolumes_set(
         return 0;
 }
 
+static usec_t epoch_or_infinity(void) {
+        static usec_t cache;
+        static bool cached = false;
+        uint64_t epoch;
+        int r;
+
+        if (cached)
+                return cache;
+
+        r = secure_getenv_uint64("SOURCE_DATE_EPOCH", &epoch);
+        if (r >= 0) {
+                if (epoch <= UINT64_MAX / USEC_PER_SEC) { /* Overflow check */
+                        cached = true;
+                        return (cache = epoch * USEC_PER_SEC);
+                }
+                r = -ERANGE;
+        }
+        if (r != -ENXIO)
+                log_debug_errno(r, "Failed to parse $SOURCE_DATE_EPOCH, ignoring: %m");
+
+        cached = true;
+        return (cache = USEC_INFINITY);
+}
+
 static int do_copy_files(Context *context, Partition *p, const char *root) {
         int r;
 
@@ -4809,6 +4833,7 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
                 _cleanup_hashmap_free_ Hashmap *denylist = NULL;
                 _cleanup_set_free_ Set *subvolumes_by_source_inode = NULL;
                 _cleanup_close_ int sfd = -EBADF, pfd = -EBADF, tfd = -EBADF;
+                usec_t ts = epoch_or_infinity();
 
                 r = make_copy_files_denylist(context, p, *source, *target, &denylist);
                 if (r < 0)
@@ -4847,7 +4872,7 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to extract directory from '%s': %m", *target);
 
-                                r = mkdir_p_root(root, dn, UID_INVALID, GID_INVALID, 0755, p->subvolumes);
+                                r = mkdir_p_root_full(root, dn, UID_INVALID, GID_INVALID, 0755, ts, p->subvolumes);
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to create parent directory '%s': %m", dn);
 
@@ -4887,7 +4912,7 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
                         if (r < 0)
                                 return log_error_errno(r, "Failed to extract directory from '%s': %m", *target);
 
-                        r = mkdir_p_root(root, dn, UID_INVALID, GID_INVALID, 0755, p->subvolumes);
+                        r = mkdir_p_root_full(root, dn, UID_INVALID, GID_INVALID, 0755, ts, p->subvolumes);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to create parent directory: %m");
 
@@ -4906,6 +4931,14 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
                         (void) copy_xattr(sfd, NULL, tfd, NULL, COPY_ALL_XATTRS);
                         (void) copy_access(sfd, tfd);
                         (void) copy_times(sfd, tfd, 0);
+
+                        if (ts != USEC_INFINITY) {
+                                struct timespec tspec;
+                                timespec_store(&tspec, ts);
+
+                                if (futimens(pfd, (const struct timespec[2]) { TIMESPEC_OMIT, tspec }) < 0)
+                                        return -errno;
+                        }
                 }
         }
 
@@ -4919,7 +4952,7 @@ static int do_make_directories(Partition *p, const char *root) {
         assert(root);
 
         STRV_FOREACH(d, p->make_directories) {
-                r = mkdir_p_root(root, *d, UID_INVALID, GID_INVALID, 0755, p->subvolumes);
+                r = mkdir_p_root_full(root, *d, UID_INVALID, GID_INVALID, 0755, epoch_or_infinity(), p->subvolumes);
                 if (r < 0)
                         return log_error_errno(r, "Failed to create directory '%s' in file system: %m", *d);
         }
@@ -6885,11 +6918,11 @@ static int help(void) {
                "     --private-key=PATH|URI\n"
                "                          Private key to use when generating verity roothash\n"
                "                          signatures, or an engine or provider specific\n"
-               "                          designation if --private-key-source= is used.\n"
+               "                          designation if --private-key-source= is used\n"
                "     --private-key-source=file|provider:PROVIDER|engine:ENGINE\n"
-               "                          Specify how to use the --private-key=. Allows one to\n"
-               "                          use an OpenSSL engine/provider when generating\n"
-               "                          verity roothash signatures\n"
+               "                          Specify how to use KEY for --private-key=. Allows\n"
+               "                          an OpenSSL engine/provider to be used for when\n"
+               "                          generating verity roothash signatures\n"
                "     --certificate=PATH   PEM certificate to use when generating verity\n"
                "                          roothash signatures\n"
                "     --tpm2-device=PATH   Path to TPM2 device node to use\n"

@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 set -e
 
+if ((NO_BUILD)); then
+    exit 0
+fi
+
 # shellcheck source=/dev/null
 . /usr/lib/os-release
 
@@ -39,6 +43,10 @@ systemd ($(cat meson.version)-$(date "+%Y%m%d%H%M%S" --date "@$TS")) UNRELEASED;
 EOF
 cat debian/changelog >>debian/changelog.new
 mv debian/changelog.new debian/changelog
+
+# FIXME: Remove after tmp.mount is kept intact in the debian packaging for UPSTREAM=1 builds.
+sed --in-place '/tmp.mount/d' debian/rules
+sed --in-place '/tmp.mount/d' debian/not-installed
 
 build() {
     DEB_BUILD_OPTIONS=$(awk '$1=$1' <<<"\
