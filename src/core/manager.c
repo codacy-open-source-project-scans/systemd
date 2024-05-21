@@ -2375,7 +2375,7 @@ int manager_load_unit_prepare(
 
         Unit *unit = manager_get_unit(m, name);
         if (unit) {
-                /* The time-based cache allows to start new units without daemon-reload,
+                /* The time-based cache allows new units to be started without daemon-reload,
                  * but if they are already referenced (because of dependencies or ordering)
                  * then we have to force a load of the fragment. As an optimization, check
                  * first if anything in the usual paths was modified since the last time
@@ -4161,7 +4161,7 @@ static int manager_run_generators(Manager *m) {
 
         /* On some systems /tmp/ doesn't exist, and on some other systems we cannot create it at all. Avoid
          * trying to mount a private tmpfs on it as there's no one size fits all. */
-        if (is_dir("/tmp", /* follow= */ false) > 0)
+        if (is_dir("/tmp", /* follow= */ false) > 0 && !MANAGER_IS_TEST_RUN(m))
                 flags |= FORK_PRIVATE_TMP;
 
         r = safe_fork("(sd-gens)", flags, NULL);
