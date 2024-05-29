@@ -1432,7 +1432,7 @@ static void run_context_check_done(RunContext *c) {
         else
                 done = true;
 
-        if (c->forward && done) /* If the service is gone, it's time to drain the output */
+        if (c->forward && !pty_forward_is_done(c->forward) && done) /* If the service is gone, it's time to drain the output */
                 done = pty_forward_drain(c->forward);
 
         if (done)
@@ -1506,9 +1506,14 @@ static int pty_forward_handler(PTYForward *f, int rcode, void *userdata) {
 
         assert(f);
 
-        if (rcode == -ECANCELED)
+        if (rcode == -ECANCELED) {
                 log_debug_errno(rcode, "PTY forwarder disconnected.");
-        else if (rcode < 0) {
+                if (!arg_wait)
+                        return sd_event_exit(c->event, EXIT_SUCCESS);
+
+                /* If --wait is specified, we'll only exit the pty forwarding, but will continue to wait
+                 * for the service to end. If the user hits ^C we'll exit too. */
+        } else if (rcode < 0) {
                 sd_event_exit(c->event, EXIT_FAILURE);
                 return log_error_errno(rcode, "Error on PTY forwarding logic: %m");
         }
@@ -1877,12 +1882,13 @@ static int start_transient_service(sd_bus *bus) {
                         if (!isempty(c.result))
                                 log_info("Finished with result: %s", strna(c.result));
 
-                        if (c.exit_code == CLD_EXITED)
-                                log_info("Main processes terminated with: code=%s/status=%u",
-                                         sigchld_code_to_string(c.exit_code), c.exit_status);
-                        else if (c.exit_code > 0)
-                                log_info("Main processes terminated with: code=%s/status=%s",
-                                         sigchld_code_to_string(c.exit_code), signal_to_string(c.exit_status));
+                        if (c.exit_code > 0)
+                                log_info("Main processes terminated with: code=%s, status=%u/%s",
+                                         sigchld_code_to_string(c.exit_code),
+                                         c.exit_status,
+                                         strna(c.exit_code == CLD_EXITED ?
+                                               exit_status_to_string(c.exit_status, EXIT_STATUS_FULL) :
+                                               signal_to_string(c.exit_status)));
 
                         if (timestamp_is_set(c.inactive_enter_usec) &&
                             timestamp_is_set(c.inactive_exit_usec) &&

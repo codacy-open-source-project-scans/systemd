@@ -204,11 +204,13 @@ sshconfdir = get_option('sshconfdir')
 if sshconfdir == ''
         sshconfdir = sysconfdir / 'ssh/ssh_config.d'
 endif
+conf.set10('LINK_SSH_PROXY_DROPIN', sshconfdir != 'no' and not sshconfdir.startswith('/usr/'))
 
 sshdconfdir = get_option('sshdconfdir')
 if sshdconfdir == ''
         sshdconfdir = sysconfdir / 'ssh/sshd_config.d'
 endif
+conf.set10('LINK_SSHD_USERDB_DROPIN', sshdconfdir != 'no' and not sshdconfdir.startswith('/usr/'))
 
 sshdprivsepdir = get_option('sshdprivsepdir')
 conf.set10('CREATE_SSHDPRIVSEPDIR', sshdprivsepdir != 'no' and not sshdprivsepdir.startswith('/usr/'))
@@ -2069,6 +2071,8 @@ libsystemd = shared_library(
         version : libsystemd_version,
         include_directories : libsystemd_includes,
         link_args : ['-shared',
+                     # Make sure our library is never deleted from memory, so that our open logging fds don't leak on dlopen/dlclose cycles.
+                     '-z', 'nodelete',
                      '-Wl,--version-script=' + libsystemd_sym_path],
         link_with : [libbasic],
         link_whole : [libsystemd_static],
@@ -2618,21 +2622,31 @@ foreach executable : ['systemd-journal-remote', 'systemd-measure']
 endforeach
 
 if mkosi.found()
+        genkey = custom_target('genkey',
+                output : ['mkosi.key', 'mkosi.crt'],
+                command : [mkosi, '--force', 'genkey'],
+                depends : mkosi_depends,
+        )
+
         custom_target('mkosi',
                 build_always_stale : true,
                 build_by_default: false,
                 console : true,
                 output : '.',
                 command : [
-                        'mkosi',
+                        mkosi,
                         '--directory', meson.current_source_dir(),
                         '--output-dir', meson.current_build_dir() / 'mkosi.output',
                         '--cache-dir', meson.current_build_dir() / 'mkosi.cache',
                         '--build-dir', meson.current_build_dir() / 'mkosi.builddir',
+                        '--secure-boot-key', meson.current_build_dir() / 'mkosi.key',
+                        '--secure-boot-certificate', meson.current_build_dir() / 'mkosi.crt',
+                        '--verity-key', meson.current_build_dir() / 'mkosi.key',
+                        '--verity-certificate', meson.current_build_dir() / 'mkosi.crt',
                         '--force',
                         'build',
                 ],
-                depends : mkosi_depends,
+                depends : mkosi_depends + [genkey],
         )
 endif
 

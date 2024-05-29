@@ -1,6 +1,6 @@
 systemd System and Service Manager
 
-CHANGES WITH 256-rc2:
+CHANGES WITH 256-rc3:
 
         Announcements of Future Feature Removals and Incompatible Changes:
 
@@ -36,6 +36,18 @@ CHANGES WITH 256-rc2:
           .network file for an interface has at least one valid setting in the
           [BridgeVLAN] section, then all assigned VLAN IDs on the interface
           that are not configured in the .network file are removed.
+
+        * IPForward= setting in .network file is deprecated and replaced with
+          IPv4Forwarding= and IPv6Forwarding= settings. These new settings are
+          supported both in .network file and networkd.conf. If specified in a
+          .network file, they control corresponding per-link settings. If
+          specified in networkd.conf, they control corresponding global
+          settings. Note, previously IPv6SendRA= and IPMasquerade= implied
+          IPForward=, but now they imply the new per-link settings. One of the
+          simplest ways to migrate configurations, that worked as a router with
+          the previous version, is enabling both IPv4Forwarding= and
+          IPv6Forwarding= in networkd.conf. See systemd.network(5) and
+          networkd.conf(5) for more details.
 
         * systemd-gpt-auto-generator will stop generating units for ESP or
           XBOOTLDR partitions if it finds mount entries for or below the /boot/
@@ -1002,25 +1014,26 @@ CHANGES WITH 256-rc2:
         Emanuele Giuseppe Esposito, Eric Daigle, Evgeny Vereshchagin,
         Felix Riemann, Fernando Fernandez Mancera, Florian Fainelli,
         Florian Schmaus, Franck Bui, Frantisek Sumsal, Friedrich Altheide,
-        Gabríel Arthúr Pétursson, Gaël Donval, Gnome Foundation,
-        Georges Basile Stavracas Neto, Gerd Hoffmann, Guido Leenders,
+        Gabríel Arthúr Pétursson, Gaël Donval, Georges Basile Stavracas Neto,
+        Gerd Hoffmann, GNOME Foundation, Guido Leenders,
         Guilhem Lettron, Göran Uddeborg, Hans de Goede, Harald Brinkmann,
-        Heinrich Schuchardt, Henry Li, Holger Assmann, Ivan Kruglov,
-        Ivan Shapovalov, Jakub Sitnicki, James Muir, Jan Engelhardt,
-        Jan Macku, Jarne Förster, Jeff King, JmbFountain,
-        Joakim Nohlgård, Jonathan Conder, Julius Alexandre,
-        Jörg Behrmann, Kai Lueke, Kamil Szczęk, KayJay7, Keian, Kirk,
-        Kristian Klausen, Krzesimir Nowak, Lars Ellenberg,
-        Lennart Poettering, Luca Boccassi, Lucas Salles, Ludwig Nussel,
-        Lukáš Nykrýn, Luna Jernberg, Luxiter, Maanya Goenka,
-        Maciej S. Szmigiero, Mariano Giménez, Markus Merklinger,
-        Martin Ivicic, Martin Srebotnjak, Martin Trigaux, Martin Wilck,
-        Mathias Lang, Matt Layher, Matt Muggeridge, Matteo Croce,
-        Matthias Lisin, Max Gautier, Max Staudt, MaxHearnden,
-        Michael Biebl, Michal Koutný, Michal Sekletár, Mike Gilbert,
-        Mike Yuan, Mikko Ylinen, MkfsSion, Moritz Sanft, MrSmör,
-        Nandakumar Raghavan, Nick Cao, Nick Rosbrook, Nicolas Bouchinet,
-        Norbert Lange, Ole Peder Brandtzæg, Ondrej Kozina, Oğuz Ersen,
+        Heinrich Schuchardt, Helmut Grohne, Henry Li, Holger Assmann,
+        Ivan Kruglov, Ivan Shapovalov, Jakub Sitnicki, James Muir,
+        Jan Engelhardt, Jan Macku, Jarne Förster, Jeff King,
+        Jian-Hong Pan, JmbFountain, Joakim Nohlgård, Jonathan Conder,
+        Julius Alexandre, Jörg Behrmann, Kai Lueke, Kamil Szczęk,
+        KayJay7, Keian, Kirk, Kristian Klausen, Krzesimir Nowak,
+        Lars Ellenberg, Lennart Poettering, Luca Boccassi, Lucas Salles,
+        Ludwig Nussel, Lukáš Nykrýn, Luna Jernberg, Luxiter,
+        Maanya Goenka, Maciej S. Szmigiero, Mariano Giménez,
+        Markus Merklinger, Martin Ivicic, Martin Srebotnjak,
+        Martin Trigaux, Martin Wilck, Mathias Lang, Matt Layher,
+        Matt Muggeridge, Matteo Croce, Matthias Lisin, Max Gautier,
+        Max Staudt, MaxHearnden, Michael Biebl, Michal Koutný,
+        Michal Sekletár, Michał Kopeć, Mike Gilbert, Mike Yuan,
+        Mikko Ylinen, MkfsSion, Moritz Sanft, MrSmör, Nandakumar Raghavan,
+        Nick Cao, Nick Rosbrook, Nicolas Bouchinet, Norbert Lange,
+        Ole Peder Brandtzæg, Ondrej Kozina, Oğuz Ersen,
         Pablo Méndez Hernández, Pierre GRASSER, Piotr Drąg, QuonXF,
         Radoslav Kolev, Rafaël Kooi, Raito Bezarius, Rasmus Villemoes,
         Reid Wahl, Renjaya Raga Zenta, Richard Maw, Roland Hieber,
@@ -1036,14 +1049,14 @@ CHANGES WITH 256-rc2:
         Vladimir Stoiakin, Werner Sembach, Will Springer, Winterhuman,
         Xiaotian Wu, Yu Watanabe, Yuri Chornoivan,
         Zbigniew Jędrzejewski-Szmek, Zmyeir, anphir, aslepykh, chenjiayi,
-        cpackham-atlnz, cunshunxia, djantti, hfavisado, hulkoba, hydrargyrum,
-        ksaleem, mburucuyapy, medusalix, mille-feuille, mkubiak, mooo,
-        msizanoen, networkException, nl6720, r-vdp, runiq, sam-leonard-ct,
-        samuelvw01, sharad3001, spdfnet, sushmbha, wangyuhang, zeroskyx,
-        zzywysm, İ. Ensar Gülşen, Łukasz Stelmach, Štěpán Němec,
-        我超厉害, 김인수
+        cpackham-atlnz, cunshunxia, djantti, drewbug, hfavisado, hulkoba,
+        hydrargyrum, ksaleem, mburucuyapy, medusalix, mille-feuille, mkubiak,
+        mooo, msizanoen, networkException, nl6720, r-vdp, runiq,
+        sam-leonard-ct, samuelvw01, sharad3001, spdfnet, sushmbha, wangyuhang,
+        zeroskyx, zzywysm, İ. Ensar Gülşen, Łukasz Stelmach,
+        Štěpán Němec, 我超厉害, 김인수
 
-        — Edinburgh, 2024-05-15
+        — Edinburgh, 2024-05-22
 
 CHANGES WITH 255:
 
@@ -16831,7 +16844,7 @@ CHANGES WITH 196:
           indexed database to link up additional information with
           journal entries. For further details please check:
 
-          https://www.freedesktop.org/wiki/Software/systemd/catalog
+          https://systemd.io/CATALOG
 
           The indexed message catalog database also needs to be
           rebuilt after installation of message catalog files. Use
