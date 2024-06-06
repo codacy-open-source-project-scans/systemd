@@ -106,7 +106,7 @@ def cp(src, dst):
     shutil.copy(src, dst)
 
 def cp_r(src, dst):
-    shutil.copytree(src, dst, copy_function=shutil.copy)
+    shutil.copytree(src, dst, copy_function=shutil.copy, dirs_exist_ok=True)
 
 def mkdir_p(path):
     os.makedirs(path, exist_ok=True)
@@ -526,7 +526,8 @@ def setup_system_units():
             'ExecStart=',
             f'ExecStart={networkctl_bin} persistent-storage yes',
             'ExecStop=',
-            f'ExecStop={networkctl_bin} persistent-storage no'
+            f'ExecStop={networkctl_bin} persistent-storage no',
+            'Environment=SYSTEMD_LOG_LEVEL=debug' if enable_debug else '',
         ]
     )
 
@@ -578,6 +579,15 @@ def save_existing_links():
 
     print('### The following links will be protected:')
     print(', '.join(sorted(list(protected_links))))
+
+def unmanage_existing_links():
+    mkdir_p(network_unit_dir)
+
+    with open(os.path.join(network_unit_dir, '00-unmanaged.network'), mode='w', encoding='utf-8') as f:
+        f.write('[Match]\n')
+        for link in protected_links:
+            f.write(f'Name={link}\n')
+        f.write('\n[Link]\nUnmanaged=yes\n')
 
 def flush_links():
     links = os.listdir('/sys/class/net')
@@ -844,6 +854,9 @@ def radvd_check_config(config_file):
 def networkd_invocation_id():
     return check_output('systemctl show --value -p InvocationID systemd-networkd.service')
 
+def networkd_pid():
+    return check_output('systemctl show --value -p MainPID systemd-networkd.service')
+
 def read_networkd_log(invocation_id=None, since=None):
     if not invocation_id:
         invocation_id = networkd_invocation_id()
@@ -875,6 +888,9 @@ def stop_networkd(show_logs=True):
 
 def start_networkd():
     check_output('systemctl start systemd-networkd')
+    invocation_id = networkd_invocation_id()
+    pid = networkd_pid()
+    print(f'Started systemd-networkd.service: PID={pid}, Invocation ID={invocation_id}')
 
 def restart_networkd(show_logs=True):
     global show_journal
@@ -884,6 +900,10 @@ def restart_networkd(show_logs=True):
     check_output('systemctl restart systemd-networkd.service')
     if show_logs:
         print(read_networkd_log(invocation_id))
+
+    invocation_id = networkd_invocation_id()
+    pid = networkd_pid()
+    print(f'Restarted systemd-networkd.service: PID={pid}, Invocation ID={invocation_id}')
 
 def networkd_pid():
     return int(check_output('systemctl show --value -p MainPID systemd-networkd.service'))
@@ -922,7 +942,14 @@ def udevadm_trigger(*args, action='add'):
     udevadm('trigger', '--settle', f'--action={action}', *args)
 
 def setup_common():
+    # Protect existing links
+    unmanage_existing_links()
+
+    # We usually show something in each test. So, let's break line to make the title of a test and output
+    # from the test mixed. Then, flush stream buffer and journals.
     print()
+    sys.stdout.flush()
+    check_output('journalctl --sync')
 
 def tear_down_common():
     # 1. stop DHCP/RA servers
@@ -954,6 +981,10 @@ def tear_down_common():
     flush_nexthops()
     flush_routing_policy_rules()
     flush_routes()
+
+    # 8. flush stream buffer and journals to make not any output from the test with the next one
+    sys.stdout.flush()
+    check_output('journalctl --sync')
 
 def setUpModule():
     rm_rf(networkd_ci_temp_dir)
@@ -987,6 +1018,10 @@ def tearDownModule():
 
     clear_system_units()
     restore_active_units()
+
+    # Flush stream buffer and journals before showing the test summary.
+    sys.stdout.flush()
+    check_output('journalctl --sync')
 
 class Utilities():
     # pylint: disable=no-member
@@ -1058,6 +1093,7 @@ class Utilities():
 
         for _ in range(setup_timeout * 2):
             if not link_exists(link):
+                time.sleep(0.5)
                 continue
             output = networkctl_status(link)
             if re.search(rf'(?m)^\s*State:\s+{operstate}\s+\({setup_state}\)\s*$', output):
@@ -1850,6 +1886,7 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         self.check_tuntap(True)
 
         clear_network_units()
+        unmanage_existing_links()
         restart_networkd()
         self.wait_online('testtun99:off', 'testtap99:off', setup_state='unmanaged')
 
@@ -5569,11 +5606,13 @@ class NetworkdRATests(unittest.TestCase, Utilities):
 
         self.check_ipv6_token_static()
 
-        # Introduce two redirect routes.
+        # Introduce three redirect routes.
         check_output(f'{test_ndisc_send} --interface veth-peer --type redirect --target-address 2002:da8:1:1:1a:2b:3c:4d --redirect-destination 2002:da8:1:1:1a:2b:3c:4d')
         check_output(f'{test_ndisc_send} --interface veth-peer --type redirect --target-address 2002:da8:1:2:1a:2b:3c:4d --redirect-destination 2002:da8:1:2:1a:2b:3c:4d')
+        check_output(f'{test_ndisc_send} --interface veth-peer --type redirect --target-address 2002:da8:1:3:1a:2b:3c:4d --redirect-destination 2002:da8:1:3:1a:2b:3c:4d')
         self.wait_route('veth99', '2002:da8:1:1:1a:2b:3c:4d proto redirect', ipv='-6', timeout_sec=10)
         self.wait_route('veth99', '2002:da8:1:2:1a:2b:3c:4d proto redirect', ipv='-6', timeout_sec=10)
+        self.wait_route('veth99', '2002:da8:1:3:1a:2b:3c:4d proto redirect', ipv='-6', timeout_sec=10)
 
         # Change the target address of the redirects.
         check_output(f'{test_ndisc_send} --interface veth-peer --type redirect --target-address fe80::1 --redirect-destination 2002:da8:1:1:1a:2b:3c:4d')
@@ -5590,11 +5629,7 @@ class NetworkdRATests(unittest.TestCase, Utilities):
         print(f'veth-peer IPv6LL address: {veth_peer_ipv6ll}')
         check_output(f'{test_ndisc_send} --interface veth-peer --type neighbor-advertisement --target-address {veth_peer_ipv6ll} --is-router no')
         self.wait_route_dropped('veth99', 'proto ra', ipv='-6', timeout_sec=10)
-
-        output = check_output('ip -6 route show dev veth99')
-        print(output)
-        self.assertIn('2002:da8:1:1:1a:2b:3c:4d via fe80::1 proto redirect', output)
-        self.assertIn('2002:da8:1:2:1a:2b:3c:4d via fe80::2 proto redirect', output)
+        self.wait_route_dropped('veth99', 'proto redirect', ipv='-6', timeout_sec=10)
 
         # Check if sd-radv refuses RS from the same interface.
         # See https://github.com/systemd/systemd/pull/32267#discussion_r1566721306
