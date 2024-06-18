@@ -14,12 +14,15 @@
 
 bool unichar_is_valid(char32_t c);
 
-char *utf8_is_valid_n(const char *str, size_t len_bytes) _pure_;
-static inline char *utf8_is_valid(const char *s) {
-        return utf8_is_valid_n(s, SIZE_MAX);
+char* utf8_is_valid_n(const char *str, size_t len_bytes) _pure_;
+static inline char* utf8_is_valid(const char *str) {
+        return utf8_is_valid_n(str, SIZE_MAX);
 }
-char *ascii_is_valid(const char *s) _pure_;
-char *ascii_is_valid_n(const char *str, size_t len);
+
+char* ascii_is_valid_n(const char *str, size_t len) _pure_;
+static inline char* ascii_is_valid(const char *str) {
+        return ascii_is_valid_n(str, SIZE_MAX);
+}
 
 int utf8_to_ascii(const char *str, char replacement_char, char **ret);
 
@@ -56,4 +59,5 @@ static inline char32_t utf16_surrogate_pair_to_unichar(char16_t lead, char16_t t
 }
 
 size_t utf8_n_codepoints(const char *str);
+int utf8_char_console_width(const char *str);
 size_t utf8_console_width(const char *str);

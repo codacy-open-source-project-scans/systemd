@@ -26,6 +26,7 @@
 #include "process-util.h"
 #include "service-util.h"
 #include "signal-util.h"
+#include "socket-util.h"
 #include "special.h"
 
 static Manager* manager_unref(Manager *m);
@@ -142,6 +143,11 @@ static int manager_add_host_machine(Manager *m) {
 
         t->leader = TAKE_PIDREF(pidref);
         t->id = mid;
+
+        /* If vsock is available, let's expose the loopback CID for the local host (and not the actual local
+         * CID, in order to return a ideally constant record for the host) */
+        if (vsock_get_local_cid(/* ret= */ NULL) >= 0)
+                t->vsock_cid = VMADDR_CID_LOCAL;
 
         t->root_directory = TAKE_PTR(rd);
         t->unit = TAKE_PTR(unit);
@@ -311,7 +317,7 @@ static int manager_startup(Manager *m) {
 }
 
 static bool check_idle(void *userdata) {
-        Manager *m = userdata;
+        Manager *m = ASSERT_PTR(userdata);
 
         if (m->operations)
                 return false;
@@ -320,6 +326,9 @@ static bool check_idle(void *userdata) {
                 return false;
 
         if (varlink_server_current_connections(m->varlink_machine_server) > 0)
+                return false;
+
+        if (!hashmap_isempty(m->polkit_registry))
                 return false;
 
         manager_gc(m, true);

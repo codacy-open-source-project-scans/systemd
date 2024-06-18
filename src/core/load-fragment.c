@@ -81,7 +81,7 @@ static int parse_socket_protocol(const char *s) {
         r = parse_ip_protocol(s);
         if (r < 0)
                 return r;
-        if (!IN_SET(r, IPPROTO_UDPLITE, IPPROTO_SCTP))
+        if (!IN_SET(r, IPPROTO_UDPLITE, IPPROTO_SCTP, IPPROTO_MPTCP))
                 return -EPROTONOSUPPORT;
 
         return r;
@@ -5197,6 +5197,34 @@ int config_parse_temporary_filesystems(
                 if (r < 0)
                         return log_oom();
         }
+}
+
+int config_parse_private_tmp(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        ExecContext *c = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(rvalue);
+
+        r = parse_boolean(rvalue);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to parse boolean value: %s ignoring", rvalue);
+                return 0;
+        }
+
+        c->private_tmp = r ? PRIVATE_TMP_CONNECTED : PRIVATE_TMP_OFF;
+        return 0;
 }
 
 int config_parse_bind_paths(
